@@ -1,4 +1,4 @@
-name: edm
+name: edm2
 channels:
   - pytorch
   - nvidia
