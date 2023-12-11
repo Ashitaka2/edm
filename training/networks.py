@@ -13,6 +13,11 @@ import torch
 from torch_utils import persistence
 from torch.nn.functional import silu
 
+
+from training import lora 
+from training.lora import LoraInjectedConv2d
+from training.lora import select_class_for_lora
+
 #----------------------------------------------------------------------------
 # Unified routine for initializing weights and biases.
 
@@ -267,7 +272,7 @@ class SongUNet(torch.nn.Module):
 
         # Mapping.
         self.map_noise = PositionalEmbedding(num_channels=noise_channels, endpoint=True) if embedding_type == 'positional' else FourierEmbedding(num_channels=noise_channels)
-        self.map_label = Linear(in_features=label_dim, out_features=noise_channels, **init) if label_dim else None
+        # self.map_label = Linear(in_features=label_dim, out_features=noise_channels, **init) if label_dim else None
         self.map_augment = Linear(in_features=augment_dim, out_features=noise_channels, bias=False, **init) if augment_dim else None
         self.map_layer0 = Linear(in_features=noise_channels, out_features=emb_channels, **init)
         self.map_layer1 = Linear(in_features=emb_channels, out_features=emb_channels, **init)
@@ -319,17 +324,17 @@ class SongUNet(torch.nn.Module):
 
     def forward(self, x, noise_labels, class_labels, augment_labels=None):
         
-        print(f"class_label is : {class_labels}")
-        print(f"class_label size is : {class_labels.size()}")
+        # print(f"class_label is : {class_labels}")
+        # print(f"class_label size is : {class_labels.size()}")
         
         # Mapping.
         emb = self.map_noise(noise_labels)
         emb = emb.reshape(emb.shape[0], 2, -1).flip(1).reshape(*emb.shape) # swap sin/cos
-        if self.map_label is not None:
-            tmp = class_labels
-            if self.training and self.label_dropout:
-                tmp = tmp * (torch.rand([x.shape[0], 1], device=x.device) >= self.label_dropout).to(tmp.dtype)
-            emb = emb + self.map_label(tmp * np.sqrt(self.map_label.in_features))
+        # if self.map_label is not None:
+        #     tmp = class_labels
+        #     if self.training and self.label_dropout:
+        #         tmp = tmp * (torch.rand([x.shape[0], 1], device=x.device) >= self.label_dropout).to(tmp.dtype)
+        #     emb = emb + self.map_label(tmp * np.sqrt(self.map_label.in_features))
         if self.map_augment is not None and augment_labels is not None:
             emb = emb + self.map_augment(augment_labels)
         emb = silu(self.map_layer0(emb))
@@ -665,7 +670,11 @@ class EDMPrecond(torch.nn.Module):
         c_out = sigma * self.sigma_data / (sigma ** 2 + self.sigma_data ** 2).sqrt()
         c_in = 1 / (self.sigma_data ** 2 + sigma ** 2).sqrt()
         c_noise = sigma.log() / 4
-
+        
+        # feed class embedding for cLoRA
+        select_class_for_lora(self.model, class_labels, num_classes = self.label_dim, verbose=True)
+        
+        
         F_x = self.model((c_in * x).to(dtype), c_noise.flatten(), class_labels=class_labels, **model_kwargs)
         assert F_x.dtype == dtype
         D_x = c_skip * x + c_out * F_x.to(torch.float32)

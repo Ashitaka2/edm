@@ -77,6 +77,18 @@ def parse_int_list(s):
 @click.option('--resume',        help='Resume from previous training state', metavar='PT',          type=str)
 @click.option('-n', '--dry-run', help='Print training options and exit',                            is_flag=True)
 
+
+#LoRA-related.
+@click.option('--tlora',            help='Apply LoRA (time) adapters',                                type=bool, default=False, show_default=True)
+@click.option('--num_classes',      help='Class numbers',                                             type=int,  default=None,  show_default=True)
+@click.option('--num_timesteps',    help='# of LoRA time adapters',                                   type=int,  default=11,    show_default=True)
+@click.option('--null_rate',        help='null rate for cLoRA',                                       type=float, default=0.0, show_default=True)
+@click.option('--r_c',              help='cLoRA rank',                                                type=int,  default=None, show_default=True)
+@click.option('--r_t',              help='tLoRA rank',                                                type=int,  default=4, show_default=True)
+@click.option('--interval',         help='tLoRA adapter interval',                                    type=int, default=None, show_default=True)
+@click.option('--interpolate',      help='tLoRA adapter interpolate scheme',                          type=str, default=None, show_default=True)
+
+
 def main(**kwargs):
     """Train diffusion-based generative model using the techniques described in the
     paper "Elucidating the Design Space of Diffusion-Based Generative Models".
@@ -196,6 +208,18 @@ def main(**kwargs):
         cur_run_id = max(prev_run_ids, default=-1) + 1
         c.run_dir = os.path.join(opts.outdir, f'{cur_run_id:05d}-{desc}')
         assert not os.path.exists(c.run_dir)
+
+
+    # Apply LoRA adapters
+    c.tlora = opts.tlora
+    c.num_classes = opts.num_classes
+    c.num_timesteps = opts.num_timesteps
+    c.null_rate = opts.null_rate
+    c.r_c = opts.r_c
+    c.r_t = opts.r_t
+    c.interval = opts.interval
+    c.interpolate = opts.interpolate
+
 
     # Print options.
     dist.print0()

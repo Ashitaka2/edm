@@ -20,6 +20,12 @@ from torch_utils import distributed as dist
 from torch_utils import training_stats
 from torch_utils import misc
 
+
+import csv
+import torch.nn.functional as F
+from training.lora import inject_trainable_lora
+
+
 #----------------------------------------------------------------------------
 
 def training_loop(
@@ -46,6 +52,14 @@ def training_loop(
     resume_kimg         = 0,        # Start from the given training progress.
     cudnn_benchmark     = True,     # Enable torch.backends.cudnn.benchmark?
     device              = torch.device('cuda'),
+    tlora               = False,    # Time-LoRA embedding,
+    num_classes         = None, 
+    num_timesteps       = 18, 
+    null_rate           = 0.0,
+    r_c                 = None,
+    r_t                 = 4,
+    interval            = 100,
+    interpolate         = None,
 ):
     # Initialize.
     start_time = time.time()
@@ -80,6 +94,22 @@ def training_loop(
             sigma = torch.ones([batch_gpu], device=device)
             labels = torch.zeros([batch_gpu, net.label_dim], device=device)
             misc.print_module_summary(net, [images, sigma, labels], max_nesting=2)
+
+    total_params = sum(p.numel() for p in net.parameters() if p.requires_grad)
+    dist.print0(f'total trainable parameter is {total_params}')
+
+    #Apply LoRA
+    if tlora is True:
+        dist.print0('Applying LoRA adapaters...')
+        lora_params, _ = inject_trainable_lora(net, verbose=True, num_classes=num_classes, num_timesteps=num_timesteps,
+                                        null_rate=null_rate, r_c = r_c, r_t = r_t, interval=interval,
+                                        interpolate=interpolate
+                                        )
+    
+        total_params = sum(p.numel() for p in net.parameters() if p.requires_grad)
+        dist.print0(f'total trainable parameter after LoRA application is {total_params}')
+    
+
 
     # Setup optimizer.
     dist.print0('Setting up optimizer...')
