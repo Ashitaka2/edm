@@ -169,10 +169,21 @@ class UNetBlock(torch.nn.Module):
             self.proj = Conv2d(in_channels=out_channels, out_channels=out_channels, kernel=1, **init_zero)
 
     def forward(self, x, emb):
+        
+        if isinstance(emb, tuple):
+            temb = emb[0]
+            aemb = emb[1]
+        # else:
+        #     temb = emb
+        #     aemb = torch.zeros_like(emb) #augment_labels 안 받으면 0 mask 출력    
+        #     print(f"aemb : {aemb}")
+        else:
+            raise Exception("aemb shouldn't be None")
+        
         orig = x
         x = self.conv0(silu(self.norm0(x)))
 
-        params = self.affine(emb).unsqueeze(2).unsqueeze(3).to(x.dtype)
+        params = self.affine(temb).unsqueeze(2).unsqueeze(3).to(x.dtype)
         if self.adaptive_scale:
             scale, shift = params.chunk(chunks=2, dim=1)
             x = silu(torch.addcmul(shift, self.norm1(x), scale + 1))
@@ -183,13 +194,29 @@ class UNetBlock(torch.nn.Module):
         x = x.add_(self.skip(orig) if self.skip is not None else orig)
         x = x * self.skip_scale
 
+        # if self.num_heads:
+        #     q, k, v = self.qkv(self.norm2(x)).reshape(x.shape[0] * self.num_heads, x.shape[1] // self.num_heads, 3, -1).unbind(2)
+        #     w = AttentionOp.apply(q, k)
+        #     a = torch.einsum('nqk,nck->ncq', w, v)
+        #     x = self.proj(a.reshape(*x.shape)).add_(x)
+        #     x = x * self.skip_scale
+        # return x
+    
         if self.num_heads:
-            q, k, v = self.qkv(self.norm2(x)).reshape(x.shape[0] * self.num_heads, x.shape[1] // self.num_heads, 3, -1).unbind(2)
+            if isinstance(self.qkv, LoraInjectedConv2d):
+                q, k, v = self.qkv(self.norm2(x), aemb).reshape(x.shape[0] * self.num_heads, x.shape[1] // self.num_heads, 3, -1).unbind(2)
+            else:
+                q, k, v = self.qkv(self.norm2(x)).reshape(x.shape[0] * self.num_heads, x.shape[1] // self.num_heads, 3, -1).unbind(2)
             w = AttentionOp.apply(q, k)
             a = torch.einsum('nqk,nck->ncq', w, v)
-            x = self.proj(a.reshape(*x.shape)).add_(x)
+            if isinstance(self.proj, LoraInjectedConv2d):
+                x = self.proj(a.reshape(*x.shape), aemb).add_(x)
+            else:    
+                x = self.proj(a.reshape(*x.shape)).add_(x)
             x = x * self.skip_scale
         return x
+
+
 
 #----------------------------------------------------------------------------
 # Timestep embedding used in the DDPM++ and ADM architectures.
@@ -270,10 +297,12 @@ class SongUNet(torch.nn.Module):
             init=init, init_zero=init_zero, init_attn=init_attn,
         )
 
+        self.augment_dim = augment_dim
+        
         # Mapping.
         self.map_noise = PositionalEmbedding(num_channels=noise_channels, endpoint=True) if embedding_type == 'positional' else FourierEmbedding(num_channels=noise_channels)
         # self.map_label = Linear(in_features=label_dim, out_features=noise_channels, **init) if label_dim else None
-        self.map_augment = Linear(in_features=augment_dim, out_features=noise_channels, bias=False, **init) if augment_dim else None
+        # self.map_augment = Linear(in_features=augment_dim, out_features=noise_channels, bias=False, **init) if augment_dim else None
         self.map_layer0 = Linear(in_features=noise_channels, out_features=emb_channels, **init)
         self.map_layer1 = Linear(in_features=emb_channels, out_features=emb_channels, **init)
 
@@ -327,6 +356,8 @@ class SongUNet(torch.nn.Module):
         # print(f"class_label is : {class_labels}")
         # print(f"class_label size is : {class_labels.size()}")
         
+        # print (f"aug_labels : {augment_labels}")
+        
         # Mapping.
         emb = self.map_noise(noise_labels)
         emb = emb.reshape(emb.shape[0], 2, -1).flip(1).reshape(*emb.shape) # swap sin/cos
@@ -335,11 +366,15 @@ class SongUNet(torch.nn.Module):
         #     if self.training and self.label_dropout:
         #         tmp = tmp * (torch.rand([x.shape[0], 1], device=x.device) >= self.label_dropout).to(tmp.dtype)
         #     emb = emb + self.map_label(tmp * np.sqrt(self.map_label.in_features))
-        if self.map_augment is not None and augment_labels is not None:
-            emb = emb + self.map_augment(augment_labels)
+        # if self.map_augment is not None and augment_labels is not None:
+        #     emb = emb + self.map_augment(augment_labels)
         emb = silu(self.map_layer0(emb))
         emb = silu(self.map_layer1(emb))
-
+        
+        if augment_labels is None:
+            augment_labels = torch.zeros(x.shape[0], self.augment_dim).to(device=x.device)
+        emb = (emb, augment_labels) #temb, aemb
+            
         # Encoder.
         skips = []
         aux = x
@@ -671,8 +706,8 @@ class EDMPrecond(torch.nn.Module):
         c_in = 1 / (self.sigma_data ** 2 + sigma ** 2).sqrt()
         c_noise = sigma.log() / 4
         
-        # feed class embedding for cLoRA
-        select_class_for_lora(self.model, class_labels, num_classes = self.label_dim, verbose=True)
+        # # feed class embedding for cLoRA
+        # select_class_for_lora(self.model, class_labels, num_classes = self.label_dim, verbose=True)
         
         
         F_x = self.model((c_in * x).to(dtype), c_noise.flatten(), class_labels=class_labels, **model_kwargs)

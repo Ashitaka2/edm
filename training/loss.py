@@ -11,6 +11,9 @@
 import torch
 from torch_utils import persistence
 
+from training.lora import select_class_for_lora
+
+
 #----------------------------------------------------------------------------
 # Loss function corresponding to the variance preserving (VP) formulation
 # from the paper "Score-Based Generative Modeling through Stochastic
@@ -74,8 +77,14 @@ class EDMLoss:
         sigma = (rnd_normal * self.P_std + self.P_mean).exp()
         weight = (sigma ** 2 + self.sigma_data ** 2) / (sigma * self.sigma_data) ** 2
         y, augment_labels = augment_pipe(images) if augment_pipe is not None else (images, None)
+        
+        # # aLoRa debugging
+        # select_class_for_lora(net, augment_labels, 9, verbose=False)
+        # # print(f"augment_labels : {augment_labels}")
+        
         n = torch.randn_like(y) * sigma
         D_yn = net(y + n, sigma, labels, augment_labels=augment_labels)
+        # D_yn = net(y + n, sigma, labels) #debug for when sampling
         loss = weight * ((D_yn - y) ** 2)
         return loss
 

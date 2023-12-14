@@ -184,10 +184,10 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
         return
 
     def select_class(self, class_labels):
-        
-        assert class_labels.size()[-1] == self.num_classes #10개
         # print(f"class_labels size is : {class_labels.size()}")
         # print(f"class_label: {class_labels}")
+        assert class_labels.size()[-1] == self.num_classes #10개 for CIFAR-10
+
         
         self.mask = class_labels
         if self.label_dropout:
@@ -222,13 +222,27 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
         self.bypass = bypass
         return
 
-    def forward(self, input):
+    # def forward(self, input):
+    #     # dist.print0(f"input size: {input.size()}")
+    #     # dist.print0(f"c_selector size: {self.c_selector.size()}")
+    #     # dist.print0(f"c_lora_down(input) size: {self.c_lora_down(input).size()}")
+    #     # dist.print0(f"mask: {self.mask}")
+    #     return self.conv2d(input) \
+    #         + self.c_lora_up(self.c_selector * self.c_lora_down(input)) \
+    #         * self.scale + (torch.matmul(self.mask, self.c_bias)).unsqueeze(-1).unsqueeze(-1) * self.scale
+
+    # augmentation embedding prototype
+    def forward(self, input, emb):
+        self.select_class(emb)
         # dist.print0(f"input size: {input.size()}")
         # dist.print0(f"c_selector size: {self.c_selector.size()}")
         # dist.print0(f"c_lora_down(input) size: {self.c_lora_down(input).size()}")
+        # dist.print0(f"mask: {self.mask}")
+        
         return self.conv2d(input) \
             + self.c_lora_up(self.c_selector * self.c_lora_down(input)) \
             * self.scale + (torch.matmul(self.mask, self.c_bias)).unsqueeze(-1).unsqueeze(-1) * self.scale
+
     
     # def forward(self, input, emb):
     #     if isinstance(emb, tuple):
