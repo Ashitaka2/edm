@@ -319,8 +319,8 @@ class SongUNet(torch.nn.Module):
 
     def forward(self, x, noise_labels, class_labels, augment_labels=None):
         
-        print(f"class_label is : {class_labels}")
-        print(f"class_label size is : {class_labels.size()}")
+        # print(f"class_label is : {class_labels}")
+        # print(f"class_label size is : {class_labels.size()}")
         
         # Mapping.
         emb = self.map_noise(noise_labels)
