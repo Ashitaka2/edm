@@ -57,9 +57,10 @@ def training_loop(
     num_timesteps       = 18, 
     null_rate           = 0.0,
     r_c                 = None,
-    r_t                 = 4,
-    interval            = 100,
+    r_t                 = None,
     interpolate         = None,
+    fourier=False,
+    no_emb=False,
 ):
     # Initialize.
     start_time = time.time()
@@ -102,8 +103,7 @@ def training_loop(
     if tlora is True:
         dist.print0('Applying LoRA adapaters...')
         lora_params, _ = inject_trainable_lora(net, verbose=True, num_classes=num_classes, num_timesteps=num_timesteps,
-                                        null_rate=null_rate, r_c = r_c, r_t = r_t, interval=interval,
-                                        interpolate=interpolate
+                                        null_rate=null_rate, r_c = r_c, r_t = r_t, interpolate=interpolate, fourier=fourier
                                         )
     
         total_params = sum(p.numel() for p in net.parameters() if p.requires_grad)

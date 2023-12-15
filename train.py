@@ -85,8 +85,8 @@ def parse_int_list(s):
 @click.option('--null_rate',        help='null rate for cLoRA',                                       type=float, default=0.0, show_default=True)
 @click.option('--r_c',              help='cLoRA rank',                                                type=int,  default=None, show_default=True)
 @click.option('--r_t',              help='tLoRA rank',                                                type=int,  default=4, show_default=True)
-@click.option('--interval',         help='tLoRA adapter interval',                                    type=int, default=None, show_default=True)
 @click.option('--interpolate',      help='tLoRA adapter interpolate scheme',                          type=str, default=None, show_default=True)
+@click.option('--embedding_type',   help='removing conventional embedding',                           type=str, default=None, show_default=True)
 
 
 def main(**kwargs):
@@ -126,15 +126,24 @@ def main(**kwargs):
 
     # Network architecture.
     if opts.arch == 'ddpmpp':
-        c.network_kwargs.update(model_type='SongUNet', embedding_type='positional', encoder_type='standard', decoder_type='standard')
+        if opts.embedding_type is None:
+            embedding_type = 'positional'
+        else:
+            embedding_type = opts.embedding_type
+        c.network_kwargs.update(model_type='SongUNet', embedding_type=embedding_type, encoder_type='standard', decoder_type='standard')
         c.network_kwargs.update(channel_mult_noise=1, resample_filter=[1,1], model_channels=128, channel_mult=[2,2,2])
     elif opts.arch == 'ncsnpp':
-        c.network_kwargs.update(model_type='SongUNet', embedding_type='fourier', encoder_type='residual', decoder_type='standard')
+        if opts.embedding_type is None:
+            embedding_type = 'fourier'
+        else:
+            embedding_type = opts.embedding_type
+        c.network_kwargs.update(model_type='SongUNet', embedding_type=embedding_type, encoder_type='residual', decoder_type='standard')
         c.network_kwargs.update(channel_mult_noise=2, resample_filter=[1,3,3,1], model_channels=128, channel_mult=[2,2,2])
     else:
         assert opts.arch == 'adm'
         c.network_kwargs.update(model_type='DhariwalUNet', model_channels=192, channel_mult=[1,2,3,4])
-
+        
+        
     # Preconditioning & loss function.
     if opts.precond == 'vp':
         c.network_kwargs.class_name = 'training.networks.VPPrecond'
@@ -219,6 +228,7 @@ def main(**kwargs):
     c.r_t = opts.r_t
     c.interval = opts.interval
     c.interpolate = opts.interpolate
+    c.fourier = opts.fourier
 
 
     # Print options.

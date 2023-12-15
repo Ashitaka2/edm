@@ -19,6 +19,43 @@ from torch_utils import training_stats
 from torch_utils import misc
 from torch_utils import persistence
 
+def weight_init(shape, mode, fan_in, fan_out):
+    if mode == 'xavier_uniform': return np.sqrt(6 / (fan_in + fan_out)) * (torch.rand(*shape) * 2 - 1)
+    if mode == 'xavier_normal':  return np.sqrt(2 / (fan_in + fan_out)) * torch.randn(*shape)
+    if mode == 'kaiming_uniform': return np.sqrt(3 / fan_in) * (torch.rand(*shape) * 2 - 1)
+    if mode == 'kaiming_normal':  return np.sqrt(1 / fan_in) * torch.randn(*shape)
+    raise ValueError(f'Invalid init mode "{mode}"')
+
+@persistence.persistent_class
+class Linear(torch.nn.Module):
+    def __init__(self, in_features, out_features, bias=True, init_mode='kaiming_normal', init_weight=1, init_bias=0):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        init_kwargs = dict(mode=init_mode, fan_in=in_features, fan_out=out_features)
+        self.weight = torch.nn.Parameter(weight_init([out_features, in_features], **init_kwargs) * init_weight)
+        self.bias = torch.nn.Parameter(weight_init([out_features], **init_kwargs) * init_bias) if bias else None
+
+    def forward(self, x):
+        x = x @ self.weight.to(x.dtype).t()
+        if self.bias is not None:
+            x = x.add_(self.bias.to(x.dtype))
+        return x
+
+
+@persistence.persistent_class
+class GroupNorm(torch.nn.Module):
+    def __init__(self, num_channels, num_groups=32, min_channels_per_group=4, eps=1e-5):
+        super().__init__()
+        self.num_groups = min(num_groups, num_channels // min_channels_per_group)
+        self.eps = eps
+        self.weight = torch.nn.Parameter(torch.ones(num_channels))
+        self.bias = torch.nn.Parameter(torch.zeros(num_channels))
+
+    def forward(self, x):
+        x = torch.nn.functional.group_norm(x, num_groups=self.num_groups, weight=self.weight.to(x.dtype),
+                                           bias=self.bias.to(x.dtype), eps=self.eps)
+        return x
 
 class FourierFeatures(nn.Module):
     """Random Fourier features.
@@ -124,7 +161,7 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
     
     def __init__(
             self, in_channels, out_channels, bias=False, r_t=4, r_c=None, scale=1.0, num_classes=None, num_timesteps=18,
-            null_rate=0.0, interval=1, interpolate=None,
+            null_rate=0.0, interpolate=None, fourier=False,
     ):
         super().__init__()
         
@@ -145,43 +182,65 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
             nn.init.normal_(self.c_lora_down.weight, std=1 / r_c)
             nn.init.zeros_(self.c_lora_up.weight)
         
-        # self.t_lora_down = conv_nd(2, in_channels, r_t * num_timesteps, 1, bias=False)
-        # self.t_lora_up = conv_nd(2, r_t * num_timesteps, out_channels, 1, bias=False)
-        # nn.init.normal_(self.t_lora_down.weight, std=1 / r_t)
-        # nn.init.zeros_(self.t_lora_up.weight)
+        self.t_lora_down = conv_nd(2, in_channels, r_t * num_timesteps, 1, bias=False)
+        self.t_lora_up = conv_nd(2, r_t * num_timesteps, out_channels, 1, bias=False)
+        nn.init.normal_(self.t_lora_down.weight, std=1 / r_t)
+        nn.init.zeros_(self.t_lora_up.weight)
 
         self.scale = scale
         self.c_selector = None
         self.t_selector = None
         self.mask = None
         self.bypass = False
-        
+        self.fourier=fourier
         self.embedding = None
-
-        self.interval = interval
+        
         self.null_rate = null_rate
         self.interpolate = interpolate
-        if self.interpolate == "train":
-            # self.embedding = SimpleEmbedding(output_size = self.num_timesteps).to(self.conv2d.weight.device) #simple embedding using raw MLP
-            self.embedding = FourierEmbedding(output_size = self.num_timesteps, num_frequency=64).to(self.conv2d.weight.device) #MLP with frozen RFF in first layer 
+        
+        # if self.interpolate == "train":
+        #     # self.embedding = SimpleEmbedding(output_size = self.num_timesteps).to(self.conv2d.weight.device) #simple embedding using raw MLP
+        #     self.embedding = FourierEmbedding(output_size = self.num_timesteps, num_frequency=64).to(self.conv2d.weight.device) #MLP with frozen RFF in first layer 
         self.c_bias = nn.Parameter(torch.zeros((self.r_c * self.num_classes, self.out_channels)))
 
         self.label_dropout = 0
     
+        if self.interpolate == 'train':
+            emb_channels = 128 * 4
+            self.t_weights = nn.Sequential(
+                Linear(in_features=emb_channels, out_features=num_timesteps),
+                GroupNorm(num_channels=num_timesteps, num_groups=3, eps=1e-6))
+            self.t_bias = nn.Parameter(torch.zeros((self.r_t * self.num_timesteps, self.out_channels)))
+        else:
+            self.t_weights = None
+    
     
     def set_t_selector(self, ts, reference_points):
         #find the closest value in reference_points and display it as one-hot style. self.num_timesteps should be 18 (=len(reference_points))
-        reference_points = torch.tensor(reference_points, device = self.conv2d.weight.device)
-        ts = ts.to(device=self.conv2d.weight.device, dtype=self.conv2d.weight.dtype).unsqueeze(1)  # Shape: [N, 1]
-        reference_points = reference_points.unsqueeze(0)  # Shape: [1, M]
-        differences = torch.abs(ts - reference_points)
-        _, min_indices = torch.min(differences, dim=1)
-        num_classes = reference_points.numel()
-        mask = torch.nn.functional.one_hot(min_indices, num_classes=num_classes)
+        if self.interpolate == "train" :
+            # ts = ts.to(device=self.conv2d.weight.device, dtype=self.conv2d.weight.dtype).unsqueeze(1)
+            ts = ts.to(device=self.conv2d.weight.device, dtype=self.conv2d.weight.dtype)
+            if self.fourier:
+                prefeature = torch.matmul(ts, self.frequency_matrix.T)
+                cos_feature = torch.cos(2 * math.pi * prefeature)
+                sin_feature = torch.sin(2 * math.pi * prefeature)
+                fourier_feature = torch.cat([cos_feature, sin_feature], dim=1)
+                mask = self.t_weights(fourier_feature)
+            else:
+                mask = self.t_weights(ts)
         
-        mask = torch.repeat_interleave(mask, self.r_t, dim=1)
-        self.t_selector = mask.unsqueeze(-1).unsqueeze(-1).to(self.conv2d.weight.device).to(self.conv2d.weight.dtype)
-        return
+        else:
+            reference_points = torch.tensor(reference_points, device = self.conv2d.weight.device)
+            ts = ts.to(device=self.conv2d.weight.device, dtype=self.conv2d.weight.dtype).unsqueeze(1)  # Shape: [N, 1]
+            reference_points = reference_points.unsqueeze(0)  # Shape: [1, M]
+            differences = torch.abs(ts - reference_points)
+            _, min_indices = torch.min(differences, dim=1)
+            num_classes = reference_points.numel()
+            mask = torch.nn.functional.one_hot(min_indices, num_classes=num_classes)
+            
+            mask = torch.repeat_interleave(mask, self.r_t, dim=1)
+            self.t_selector = mask.unsqueeze(-1).unsqueeze(-1).to(self.conv2d.weight.device).to(self.conv2d.weight.dtype)
+            return
 
     def select_class(self, class_labels):
         
@@ -189,12 +248,12 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
         # print(f"class_labels size is : {class_labels.size()}")
         # print(f"class_label: {class_labels}")
         
-        self.mask = class_labels
+        self.c_mask = class_labels
         if self.label_dropout:
-            self.mask = self.mask * (torch.rand([class_labels.shape[0], 1], device=class_labels.device) >= self.label_dropout).to(self.mask.dtype)
-        self.mask = torch.repeat_interleave(self.mask, self.r_c, dim=1)
+            self.c_mask = self.c_mask * (torch.rand([class_labels.shape[0], 1], device=class_labels.device) >= self.label_dropout).to(self.mask.dtype)
+        self.c_mask = torch.repeat_interleave(self.c_mask, self.r_c, dim=1)
         # print(f"mask size: {self.mask.shape}") #[B, 40]
-        self.c_selector = self.mask.unsqueeze(-1).unsqueeze(-1).to(self.conv2d.weight.device).to(self.conv2d.weight.dtype)
+        self.c_selector = self.c_mask.unsqueeze(-1).unsqueeze(-1).to(self.conv2d.weight.device).to(self.conv2d.weight.dtype)
         # print(f"c_selector size: {self.c_selector.shape}")
         
     def simple_embedding(self, ts):
@@ -222,69 +281,34 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
         self.bypass = bypass
         return
 
-    def forward(self, input):
+    def forward(self, input, emb):
+        if self.bypass:
+            return self.conv2d(input)
+        elif self.r_c is not None:
+            mask = self.t_weights(emb)
+            b_mask = torch.repeat_interleave(mask, self.r_t, dim=1).to(self.conv2d.weight.device).to(self.conv2d.weight.dtype)
+            ab_mask = torch.repeat_interleave(mask, self.r_t, dim=1).unsqueeze(-1).unsqueeze(-1).to(self.conv2d.weight.device).to(self.conv2d.weight.dtype)
+            return self.conv2d(input) \
+            + self.t_lora_up(ab_mask * self.t_lora_down(input)) \
+            * self.scale + (torch.matmul(b_mask, self.t_bias)).unsqueeze(2).unsqueeze(-1) * self.scale\
+            + self.c_lora_up(self.c_selector * self.c_lora_down(input)) \
+            * self.scale + (torch.matmul(self.c_mask, self.c_bias)).unsqueeze(-1).unsqueeze(-1) * self.scale
+        else:
+            mask = self.t_weights(emb)
+            b_mask = torch.repeat_interleave(mask, self.r_t, dim=1).to(self.conv2d.weight.device).to(self.conv2d.weight.dtype)
+            ab_mask = torch.repeat_interleave(mask, self.r_t, dim=1).unsqueeze(-1).unsqueeze(-1).to(self.conv2d.weight.device).to(self.conv2d.weight.dtype)
+            # self.t_selector = mask.unsqueeze(2).to(self.conv2d.weight.device).to(self.conv2d.weight.dtype)
+            return self.conv2d(input) \
+                + self.t_lora_up(ab_mask * self.t_lora_down(input)) \
+                * self.scale + (torch.matmul(b_mask, self.t_bias)).unsqueeze(2).unsqueeze(-1) * self.scale
+            
         # dist.print0(f"input size: {input.size()}")
         # dist.print0(f"c_selector size: {self.c_selector.size()}")
         # dist.print0(f"c_lora_down(input) size: {self.c_lora_down(input).size()}")
-        return self.conv2d(input) \
-            + self.c_lora_up(self.c_selector * self.c_lora_down(input)) \
-            * self.scale + (torch.matmul(self.mask, self.c_bias)).unsqueeze(-1).unsqueeze(-1) * self.scale
-    
-    # def forward(self, input, emb):
-    #     if isinstance(emb, tuple):
-    #         t = emb[0]
-    #         c = emb[1]
-    #     else:
-    #         t = emb
-    #         c = None
-        
-    #     if self.bypass:
-    #         return self.conv2d(input)
-        
-    #     elif self.interpolate == "train":
-    #         # dist.print0("Trainable LoRA mask...")
-    #         self.simple_embedding(t)
-    #         # self.t_selector = torch.repeat_interleave(self.mask, self.r_t, dim=1) #size: (B, r_t * num_timesteps)
-    #         self.t_selector = self.mask.unsqueeze(-1).unsqueeze(-1)
-            
-    #         # dist.print0(f"input size: {input.size()}")
-    #         # dist.print0(f"t_selector size: {self.t_selector.size()}")
-    #         # dist.print0(f"t_lora_down(input) size: {self.t_lora_down(input).size()}")
-            
-    #         return self.conv2d(input) \
-    #             + self.t_lora_up(self.t_selector * self.t_lora_down(input)) \
-    #             * self.scale + (torch.matmul(self.mask, self.bias)).unsqueeze(-1).unsqueeze(-1) * self.scale
-              
-    #     else:
-    #         reference_points = [80.0, 57.58598472124816, 40.78557379650796, 28.374584604156844, 19.35245298032523, 
-    #                             12.91008238075732, 8.400935309099816, 5.315194521796382, 3.256821519765537, 1.9233398370400518, 
-    #                             1.088170636545279, 0.5853481231945422, 0.29644228447915727, 0.13951646873101678, 0.05994731123547159, 
-    #                             0.022934518372333384, 0.0075280199627840785, 0.002000000000000003] #num_timesteps=18, EDM sampling sigma
-    #         self.set_t_selector(t, reference_points)
-            
-    #         # dist.print0(f"input size: {input.size()}")
-    #         # dist.print0(f"t_selector size: {self.t_selector.size()}")
-    #         # dist.print0(f"t_lora_down(input) size: {self.t_lora_down(input).size()}")
-            
-    #         if c is not None:
-    #             self.set_c_selector(c)
-    #             return self.conv2d(input) \
-    #                    + self.c_lora_up(self.c_selector * self.c_lora_down(input)) * self.scale \
-    #                    + self.t_lora_up(self.t_selector * self.t_lora_down(input)) * self.scale
-    #         else:
-    #             self.t_selector = self.t_selector.unsqueeze(-1)
-    #             return self.conv2d(input) \
-    #                    + self.t_lora_up(self.t_selector * self.t_lora_down(input)) \
-    #                    * self.scale
+        # return self.conv2d(input) \
+        #     + self.c_lora_up(self.c_selector * self.c_lora_down(input)) \
+        #     * self.scale + (torch.matmul(self.mask, self.c_bias)).unsqueeze(-1).unsqueeze(-1) * self.scale
 
-
-def extract_embedding_weights(model):
-    embeddings = []
-    for module in model.modules():
-        # if isinstance(module, LoraInjectedConv1d):
-        if isinstance(module, LoraInjectedConv2d) and module.t_embedding.weight.requires_grad:
-            embeddings.append(module.t_embedding.weight.data.clone())
-    return embeddings
 
 DEFAULT_TARGET_REPLACE = {"UNetBlock"}
 
@@ -387,8 +411,8 @@ def inject_trainable_lora(
     num_classes: int = None,
     num_timesteps: int = 11,
     scale: float = 1.0,
-    interval: int = 1,
     interpolate = None,
+    fourier=False,
 ):
     """
     inject lora into model, and returns lora parameter groups.
@@ -451,9 +475,9 @@ def inject_trainable_lora(
                 num_classes=num_classes,
                 num_timesteps=num_timesteps,
                 scale=scale,
-                interval=interval,
                 interpolate=interpolate,
                 null_rate=null_rate,
+                fourier=fourier,
             )
             _tmp.conv2d.weight = weight
             if bias is not None:
