@@ -86,8 +86,8 @@ def parse_int_list(s):
 @click.option('--r_c',              help='cLoRA rank',                                                type=int,  default=None, show_default=True)
 @click.option('--r_t',              help='tLoRA rank',                                                type=int,  default=4, show_default=True)
 @click.option('--interpolate',      help='tLoRA adapter interpolate scheme',                          type=str, default=None, show_default=True)
+@click.option('--fourier',          help='tLoRA fourier feature',                                     type=bool, default=False, show_default=True)
 @click.option('--embedding_type',   help='removing conventional embedding',                           type=str, default=None, show_default=True)
-
 
 def main(**kwargs):
     """Train diffusion-based generative model using the techniques described in the
@@ -226,7 +226,6 @@ def main(**kwargs):
     c.null_rate = opts.null_rate
     c.r_c = opts.r_c
     c.r_t = opts.r_t
-    c.interval = opts.interval
     c.interpolate = opts.interpolate
     c.fourier = opts.fourier
 

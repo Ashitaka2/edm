@@ -280,9 +280,11 @@ class SongUNet(torch.nn.Module):
         block_kwargs = dict(
             emb_channels=emb_channels, num_heads=1, dropout=dropout, skip_scale=np.sqrt(0.5), eps=1e-6,
             resample_filter=resample_filter, resample_proj=True, adaptive_scale=False,
-            init=init, init_zero=init_zero, init_attn=init_attn,
+            init=init, init_zero=init_zero, init_attn=init_attn, embedding_type=embedding_type
         )
 
+        self.embedding_type = embedding_type
+        
         # Mapping.
         if self.embedding_type != 'no_emb':
             self.map_noise = PositionalEmbedding(num_channels=noise_channels, endpoint=True) if 'positional' in embedding_type else FourierEmbedding(num_channels=noise_channels)
