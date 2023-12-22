@@ -303,6 +303,7 @@ class SongUNet(torch.nn.Module):
         self.map_noise = PositionalEmbedding(num_channels=noise_channels, endpoint=True) if embedding_type == 'positional' else FourierEmbedding(num_channels=noise_channels)
         # self.map_label = Linear(in_features=label_dim, out_features=noise_channels, **init) if label_dim else None
         # self.map_augment = Linear(in_features=augment_dim, out_features=noise_channels, bias=False, **init) if augment_dim else None
+        self.map_augment = Linear(in_features=augment_dim, out_features=augment_dim, bias=False, **init) if augment_dim else None
         self.map_layer0 = Linear(in_features=noise_channels, out_features=emb_channels, **init)
         self.map_layer1 = Linear(in_features=emb_channels, out_features=emb_channels, **init)
 
@@ -373,7 +374,10 @@ class SongUNet(torch.nn.Module):
         
         if augment_labels is None:
             augment_labels = torch.zeros(x.shape[0], self.augment_dim).to(device=x.device)
-        emb = (emb, augment_labels) #temb, aemb
+        
+        #1-layer augment MLP before appylying to LoRA
+        augment_labels = self.map_augment(augment_labels)
+        emb = (emb, augment_labels)#temb, aemb
             
         # Encoder.
         skips = []
