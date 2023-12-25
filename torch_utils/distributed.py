@@ -12,6 +12,8 @@ from . import training_stats
 #----------------------------------------------------------------------------
 
 def init():
+    if torch.distributed.is_initialized():
+        return
     if 'MASTER_ADDR' not in os.environ:
         os.environ['MASTER_ADDR'] = 'localhost'
     if 'MASTER_PORT' not in os.environ:

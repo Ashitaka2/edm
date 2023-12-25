@@ -179,6 +179,13 @@ class UNetBlock(torch.nn.Module):
         elif 'only_lora' in self.embedding_type:
             pass
         else:
+            if isinstance(emb, tuple):
+                lemb = emb #temb, aemb, cemb
+                emb = emb[0]
+            else:
+                emb = emb
+                lemb = None
+            
             params = self.affine(emb).unsqueeze(2).unsqueeze(3).to(x.dtype)
             if self.adaptive_scale:
                 scale, shift = params.chunk(chunks=2, dim=1)
@@ -192,13 +199,13 @@ class UNetBlock(torch.nn.Module):
 
         if self.num_heads:
             if isinstance(self.qkv, LoraInjectedConv2d):
-                q, k, v = self.qkv(self.norm2(x), emb).reshape(x.shape[0] * self.num_heads, x.shape[1] // self.num_heads, 3, -1).unbind(2)
+                q, k, v = self.qkv(self.norm2(x), lemb).reshape(x.shape[0] * self.num_heads, x.shape[1] // self.num_heads, 3, -1).unbind(2)
             else:
                 q, k, v = self.qkv(self.norm2(x)).reshape(x.shape[0] * self.num_heads, x.shape[1] // self.num_heads, 3, -1).unbind(2)
             w = AttentionOp.apply(q, k)
             a = torch.einsum('nqk,nck->ncq', w, v)
             if isinstance(self.proj, LoraInjectedConv2d):
-                x = self.proj(a.reshape(*x.shape), emb).add_(x)
+                x = self.proj(a.reshape(*x.shape), lemb).add_(x)
             else:
                 x = self.proj(a.reshape(*x.shape)).add_(x)
             x = x * self.skip_scale
@@ -284,6 +291,8 @@ class SongUNet(torch.nn.Module):
         )
 
         self.embedding_type = embedding_type
+        self.noise_channels = noise_channels
+        
         
         # Mapping.
         if self.embedding_type != 'no_emb':
@@ -339,26 +348,51 @@ class SongUNet(torch.nn.Module):
                 self.dec[f'{res}x{res}_aux_conv'] = Conv2d(in_channels=cout, out_channels=out_channels, kernel=3, **init_zero)
 
     def forward(self, x, noise_labels, class_labels, augment_labels=None):
-        
-        # print(f"class_label is : {class_labels}")
-        # print(f"class_label size is : {class_labels.size()}")
-        
+        # Mapping.
+        # if self.embedding_type == 'no_emb':
+        #     emb = None
+        # else:
+        #     emb = self.map_noise(noise_labels)
+        #     emb = emb.reshape(emb.shape[0], 2, -1).flip(1).reshape(*emb.shape) # swap sin/cos
+        #     if self.map_label is not None:
+        #         tmp = class_labels
+        #         if self.training and self.label_dropout:
+        #             tmp = tmp * (torch.rand([x.shape[0], 1], device=x.device) >= self.label_dropout).to(tmp.dtype)
+        #         emb = emb + self.map_label(tmp * np.sqrt(self.map_label.in_features))
+        #     if self.map_augment is not None and augment_labels is not None:
+        #         emb = emb + self.map_augment(augment_labels)
+        #     emb = silu(self.map_layer0(emb))
+        #     emb = silu(self.map_layer1(emb))
+
         # Mapping.
         if self.embedding_type == 'no_emb':
             emb = None
         else:
             emb = self.map_noise(noise_labels)
             emb = emb.reshape(emb.shape[0], 2, -1).flip(1).reshape(*emb.shape) # swap sin/cos
+            
             if self.map_label is not None:
                 tmp = class_labels
                 if self.training and self.label_dropout:
                     tmp = tmp * (torch.rand([x.shape[0], 1], device=x.device) >= self.label_dropout).to(tmp.dtype)
+                cemb = tmp
                 emb = emb + self.map_label(tmp * np.sqrt(self.map_label.in_features))
+            
             if self.map_augment is not None and augment_labels is not None:
-                emb = emb + self.map_augment(augment_labels)
+                aemb = self.map_augment(augment_labels)
+                emb = emb + aemb
+            else:
+                aemb = torch.zeros(x.shape[0], self.noise_channels).to(device=x.device)
+                
             emb = silu(self.map_layer0(emb))
             emb = silu(self.map_layer1(emb))
-
+            
+            if self.map_label is not None:
+                emb = (emb, aemb, cemb)
+            else:
+                emb = (emb, aemb)
+        
+        
         # Encoder.
         skips = []
         aux = x
@@ -690,8 +724,8 @@ class EDMPrecond(torch.nn.Module):
         c_in = 1 / (self.sigma_data ** 2 + sigma ** 2).sqrt()
         c_noise = sigma.log() / 4
         
-        # feed class embedding for cLoRA
-        select_class_for_lora(self.model, class_labels, num_classes = self.label_dim, verbose=True)
+        # # feed class embedding for cLoRA
+        # select_class_for_lora(self.model, class_labels, num_classes = self.label_dim, verbose=True)
         
         
         F_x = self.model((c_in * x).to(dtype), c_noise.flatten(), class_labels=class_labels, **model_kwargs)

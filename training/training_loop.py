@@ -54,10 +54,12 @@ def training_loop(
     device              = torch.device('cuda'),
     tlora               = False,    # Time-LoRA embedding,
     num_classes         = None, 
-    num_timesteps       = 18, 
+    num_timesteps       = 18,
+    num_augments        = None, 
     null_rate           = 0.0,
     r_c                 = None,
     r_t                 = None,
+    r_a                 = None,
     interpolate         = None,
     fourier=False,
     no_emb=False,
@@ -102,8 +104,8 @@ def training_loop(
     #Apply LoRA
     if tlora is True:
         dist.print0('Applying LoRA adapaters...')
-        lora_params, _ = inject_trainable_lora(net, verbose=True, num_classes=num_classes, num_timesteps=num_timesteps,
-                                        null_rate=null_rate, r_c = r_c, r_t = r_t, interpolate=interpolate, fourier=fourier
+        lora_params, _ = inject_trainable_lora(net, verbose=True, num_classes=num_classes, num_timesteps=num_timesteps, num_augments = num_augments,
+                                        null_rate=null_rate, r_c = r_c, r_t = r_t, r_a=r_a, interpolate=interpolate, fourier=fourier
                                         )
     
         total_params = sum(p.numel() for p in net.parameters() if p.requires_grad)
