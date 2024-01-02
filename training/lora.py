@@ -200,7 +200,6 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
         nn.init.zeros_(self.t_lora_up.weight)
         
         scale = 1.0
-        self.scale = scale
         self.tscale = scale
         self.ascale = scale
         self.cscale = scale
@@ -224,9 +223,13 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
         if self.interpolate == 'train':
             emb_channels = 128 * 4
             self.t_weights = nn.Sequential(
-                GroupNorm(num_channels=emb_channels, eps=1e-6),
-                Linear(in_features=emb_channels, out_features=num_timesteps),
-                # torch.nn.SiLU())
+                Linear(in_features=emb_channels, out_features=128),
+                GroupNorm(num_channels=128, eps=1e-6),
+                torch.nn.SiLU(),
+                Linear(in_features=128, out_features=64),
+                GroupNorm(num_channels=64, eps=1e-6),
+                torch.nn.SiLU(),
+                Linear(in_features=64, out_features=num_timesteps),
             )
             self.t_bias = nn.Parameter(torch.zeros((self.r_t * self.num_timesteps, self.out_channels)))
         else:
@@ -329,19 +332,19 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
         
         out = self.conv2d(input) \
                 + self.t_lora_up(tab_mask * self.t_lora_down(input)) \
-                * self.scale + (torch.matmul(tb_mask, self.t_bias)).unsqueeze(-1).unsqueeze(-1) * self.scale
+                * self.tscale + (torch.matmul(tb_mask, self.t_bias)).unsqueeze(-1).unsqueeze(-1) * self.tscale
         
         if self.r_c is not None:
             self.select_class(c)
             out += self.c_lora_up(self.c_selector * self.c_lora_down(input)) \
-            * self.scale + (torch.matmul(self.c_mask, self.c_bias)).unsqueeze(-1).unsqueeze(-1) * self.scale
+            * self.cscale + (torch.matmul(self.c_mask, self.c_bias)).unsqueeze(-1).unsqueeze(-1) * self.cscale
 
         if self.r_a is not None:
             a_mask = self.a_weights(a)
             b_mask = torch.repeat_interleave(a_mask, self.r_a, dim=1).to(self.conv2d.weight.device).to(self.conv2d.weight.dtype)
             ab_mask = torch.repeat_interleave(a_mask, self.r_a, dim=1).unsqueeze(-1).unsqueeze(-1).to(self.conv2d.weight.device).to(self.conv2d.weight.dtype)
             out += self.a_lora_up(ab_mask * self.a_lora_down(input)) \
-                * self.scale + (torch.matmul(b_mask, self.a_bias)).unsqueeze(-1).unsqueeze(-1) * self.scale
+                * self.ascale + (torch.matmul(b_mask, self.a_bias)).unsqueeze(-1).unsqueeze(-1) * self.ascale
         
         return out
         # dist.print0(f"input size: {input.size()}")
