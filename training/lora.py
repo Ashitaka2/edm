@@ -199,11 +199,13 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
         nn.init.normal_(self.t_lora_down.weight, std=1 / r_t)
         nn.init.zeros_(self.t_lora_up.weight)
         
-        scale = 1.0
-        self.scale = scale
-        self.tscale = scale
-        self.ascale = scale
-        self.cscale = scale
+        initial_scale = 1.0
+        # self.tscale = initial_scale
+        # self.ascale = initial_scale
+        # self.cscale = initial_scale
+        self.tscale = nn.Parameter(torch.tensor(initial_scale))
+        self.ascale = nn.Parameter(torch.tensor(initial_scale))
+        self.cscale = nn.Parameter(torch.tensor(initial_scale))
         
         self.c_selector = None
         self.t_selector = None
@@ -329,19 +331,19 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
         
         out = self.conv2d(input) \
                 + self.t_lora_up(tab_mask * self.t_lora_down(input)) \
-                * self.scale + (torch.matmul(tb_mask, self.t_bias)).unsqueeze(-1).unsqueeze(-1) * self.scale
+                * self.tscale + (torch.matmul(tb_mask, self.t_bias)).unsqueeze(-1).unsqueeze(-1) * self.tscale
         
         if self.r_c is not None:
             self.select_class(c)
             out += self.c_lora_up(self.c_selector * self.c_lora_down(input)) \
-            * self.scale + (torch.matmul(self.c_mask, self.c_bias)).unsqueeze(-1).unsqueeze(-1) * self.scale
+            * self.cscale + (torch.matmul(self.c_mask, self.c_bias)).unsqueeze(-1).unsqueeze(-1) * self.cscale
 
         if self.r_a is not None:
             a_mask = self.a_weights(a)
             b_mask = torch.repeat_interleave(a_mask, self.r_a, dim=1).to(self.conv2d.weight.device).to(self.conv2d.weight.dtype)
             ab_mask = torch.repeat_interleave(a_mask, self.r_a, dim=1).unsqueeze(-1).unsqueeze(-1).to(self.conv2d.weight.device).to(self.conv2d.weight.dtype)
             out += self.a_lora_up(ab_mask * self.a_lora_down(input)) \
-                * self.scale + (torch.matmul(b_mask, self.a_bias)).unsqueeze(-1).unsqueeze(-1) * self.scale
+                * self.ascale + (torch.matmul(b_mask, self.a_bias)).unsqueeze(-1).unsqueeze(-1) * self.ascale
         
         return out
         # dist.print0(f"input size: {input.size()}")
