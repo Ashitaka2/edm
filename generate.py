@@ -221,6 +221,8 @@ def parse_int_list(s):
 @click.option('--class', 'class_idx',      help='Class label  [default: random]', metavar='INT',                    type=click.IntRange(min=0), default=None)
 @click.option('--batch', 'max_batch_size', help='Maximum batch size', metavar='INT',                                type=click.IntRange(min=1), default=64, show_default=True)
 
+@click.option('--scale', 'lora_scale',      help='Control LoRA adapter power', metavar='FLOAT',                      type=click.FloatRange(min=0), default=None)
+
 @click.option('--steps', 'num_steps',      help='Number of sampling steps', metavar='INT',                          type=click.IntRange(min=1), default=18, show_default=True)
 @click.option('--sigma_min',               help='Lowest noise level  [default: varies]', metavar='FLOAT',           type=click.FloatRange(min=0, min_open=True))
 @click.option('--sigma_max',               help='Highest noise level  [default: varies]', metavar='FLOAT',          type=click.FloatRange(min=0, min_open=True))
@@ -235,7 +237,7 @@ def parse_int_list(s):
 @click.option('--schedule',                help='Ablate noise schedule sigma(t)', metavar='vp|ve|linear',           type=click.Choice(['vp', 've', 'linear']))
 @click.option('--scaling',                 help='Ablate signal scaling s(t)', metavar='vp|none',                    type=click.Choice(['vp', 'none']))
 
-def main(network_pkl, outdir, subdirs, seeds, class_idx, max_batch_size, device=torch.device('cuda'), **sampler_kwargs):
+def main(network_pkl, outdir, subdirs, seeds, class_idx, max_batch_size, lora_scale, device=torch.device('cuda'), **sampler_kwargs):
     """Generate random images using the techniques described in the paper
     "Elucidating the Design Space of Diffusion-Based Generative Models".
 
@@ -268,6 +270,16 @@ def main(network_pkl, outdir, subdirs, seeds, class_idx, max_batch_size, device=
     # Other ranks follow.
     if dist.get_rank() == 0:
         torch.distributed.barrier()
+        
+        
+    # change lora scales (prototype)
+    if lora_scale is not None:
+        from training.lora import LoraInjectedConv2d
+        for module in net.modules():
+            # print(module)
+            if isinstance(module, LoraInjectedConv2d):
+                # print("injected?")
+                module.scale = lora_scale
 
     # Loop over batches.
     dist.print0(f'Generating {len(seeds)} images to "{outdir}"...')

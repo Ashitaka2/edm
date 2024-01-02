@@ -47,8 +47,8 @@ class Linear(torch.nn.Module):
 class GroupNorm(torch.nn.Module):
     def __init__(self, num_channels, num_groups=32, min_channels_per_group=4, eps=1e-5):
         super().__init__()
-        # self.num_groups = min(num_groups, num_channels // min_channels_per_group)
-        self.num_groups = num_groups #channel들에 divide되어야 하는데, 지금 18(t), 9(a) 쓰고 있으니...
+        self.num_groups = min(num_groups, num_channels // min_channels_per_group)
+        # self.num_groups = num_groups #channel들에 divide되어야 하는데, 지금 18(t), 9(a) 쓰고 있으니...
         self.eps = eps
         self.weight = torch.nn.Parameter(torch.ones(num_channels))
         self.bias = torch.nn.Parameter(torch.zeros(num_channels))
@@ -198,8 +198,13 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
         self.t_lora_up = conv_nd(2, r_t * num_timesteps, out_channels, 1, bias=False)
         nn.init.normal_(self.t_lora_down.weight, std=1 / r_t)
         nn.init.zeros_(self.t_lora_up.weight)
-
+        
+        scale = 1.0
         self.scale = scale
+        self.tscale = scale
+        self.ascale = scale
+        self.cscale = scale
+        
         self.c_selector = None
         self.t_selector = None
         self.mask = None
@@ -219,9 +224,10 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
         if self.interpolate == 'train':
             emb_channels = 128 * 4
             self.t_weights = nn.Sequential(
+                GroupNorm(num_channels=emb_channels, eps=1e-6),
                 Linear(in_features=emb_channels, out_features=num_timesteps),
-                GroupNorm(num_channels=num_timesteps, num_groups=3, eps=1e-6),
-                torch.nn.SiLU())
+                # torch.nn.SiLU())
+            )
             self.t_bias = nn.Parameter(torch.zeros((self.r_t * self.num_timesteps, self.out_channels)))
         else:
             self.t_weights = None
@@ -229,9 +235,10 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
         if self.r_a is not None:
             noise_channels = 128
             self.a_weights = nn.Sequential(
+                GroupNorm(num_channels=noise_channels, eps=1e-6), 
                 Linear(in_features=noise_channels, out_features=num_augments),
-                GroupNorm(num_channels=num_augments, num_groups=3, eps=1e-6), 
-                torch.nn.SiLU())
+                # torch.nn.SiLU())
+            )
             self.a_bias = nn.Parameter(torch.zeros((self.r_a * self.num_augments, self.out_channels)))
         else:
             self.a_weights = None
@@ -295,14 +302,14 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
 
     def forward(self, input, emb): #self.interpolate == "train" 외의 예외처리 아직 제대로 안됨
         if isinstance(emb, tuple):
-            if len(emb) == 3:
-                t = emb[0]
-                a = emb[1]
-                c = emb[2]
+            if len(emb) == 4:
+                t = emb[1]
+                a = emb[2]
+                c = emb[3]
             else:
-                assert len(emb)==2
-                t = emb[0]
-                a = emb[1]
+                assert len(emb)==3
+                t = emb[1]
+                a = emb[2]
                 c = None
         else:
             t = emb
@@ -333,8 +340,7 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
             a_mask = self.a_weights(a)
             b_mask = torch.repeat_interleave(a_mask, self.r_a, dim=1).to(self.conv2d.weight.device).to(self.conv2d.weight.dtype)
             ab_mask = torch.repeat_interleave(a_mask, self.r_a, dim=1).unsqueeze(-1).unsqueeze(-1).to(self.conv2d.weight.device).to(self.conv2d.weight.dtype)
-            out += self.conv2d(input) \
-                + self.a_lora_up(ab_mask * self.a_lora_down(input)) \
+            out += self.a_lora_up(ab_mask * self.a_lora_down(input)) \
                 * self.scale + (torch.matmul(b_mask, self.a_bias)).unsqueeze(-1).unsqueeze(-1) * self.scale
         
         return out

@@ -262,7 +262,7 @@ def main(data_dir, subdirs, seeds, class_idx, max_batch_size, device=torch.devic
     network_pkls = get_checkpoints(data_dir)
     dist.print0(f"Number of pkls in directory : {len(network_pkls)}")
     network_pkls.sort(reverse=True)
-    freq = 2
+    freq = 1
     start_from = 120000
     for i, network_pkl in enumerate(network_pkls):
         if i % freq != 0:

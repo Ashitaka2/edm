@@ -180,7 +180,7 @@ class UNetBlock(torch.nn.Module):
             pass
         else:
             if isinstance(emb, tuple):
-                lemb = emb #temb, aemb, cemb
+                lemb = emb #emb, temb, aemb, cemb
                 emb = emb[0]
             else:
                 emb = emb
@@ -301,7 +301,11 @@ class SongUNet(torch.nn.Module):
             self.map_augment = Linear(in_features=augment_dim, out_features=noise_channels, bias=False, **init) if augment_dim else None
             self.map_layer0 = Linear(in_features=noise_channels, out_features=emb_channels, **init)
             self.map_layer1 = Linear(in_features=emb_channels, out_features=emb_channels, **init)
-            
+        
+        self.tmap_layer0 = Linear(in_features=noise_channels, out_features=emb_channels, **init)
+        self.tmap_layer1 = Linear(in_features=emb_channels, out_features=emb_channels, **init)
+        
+        
         # Encoder.
         self.enc = torch.nn.ModuleDict()
         cout = in_channels
@@ -370,6 +374,8 @@ class SongUNet(torch.nn.Module):
         else:
             emb = self.map_noise(noise_labels)
             emb = emb.reshape(emb.shape[0], 2, -1).flip(1).reshape(*emb.shape) # swap sin/cos
+            temb = self.map_noise(noise_labels)
+            temb = temb.reshape(temb.shape[0], 2, -1).flip(1).reshape(*temb.shape) # swap sin/cos
             
             if self.map_label is not None:
                 tmp = class_labels
@@ -387,10 +393,13 @@ class SongUNet(torch.nn.Module):
             emb = silu(self.map_layer0(emb))
             emb = silu(self.map_layer1(emb))
             
+            temb = silu(self.tmap_layer0(temb))
+            temb = silu(self.tmap_layer1(temb))
+            
             if self.map_label is not None:
-                emb = (emb, aemb, cemb)
+                emb = (emb, temb, aemb, cemb)
             else:
-                emb = (emb, aemb)
+                emb = (emb, temb, aemb)
         
         
         # Encoder.
