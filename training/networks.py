@@ -62,6 +62,7 @@ class Conv2d(torch.nn.Module):
         self.out_channels = out_channels
         self.up = up
         self.down = down
+        self.kernel = kernel
         self.fused_resample = fused_resample
         init_kwargs = dict(mode=init_mode, fan_in=in_channels*kernel*kernel, fan_out=out_channels*kernel*kernel)
         self.weight = torch.nn.Parameter(weight_init([out_channels, in_channels, kernel, kernel], **init_kwargs) * init_weight) if kernel else None
@@ -186,7 +187,11 @@ class UNetBlock(torch.nn.Module):
             else:
                 x = silu(self.norm1(x.add_(params)))
 
-        x = self.conv1(torch.nn.functional.dropout(x, p=self.dropout, training=self.training))
+        if isinstance(self.conv1, LoraInjectedConv2d):
+            x = self.conv1(torch.nn.functional.dropout(x, p=self.dropout, training=self.training), emb)
+        else:
+            x = self.conv1(torch.nn.functional.dropout(x, p=self.dropout, training=self.training))
+        
         x = x.add_(self.skip(orig) if self.skip is not None else orig)
         x = x * self.skip_scale
 

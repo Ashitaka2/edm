@@ -161,7 +161,7 @@ class FourierEmbedding(nn.Module):
 class LoraInjectedConv2d(nn.Module): #for cLoRA
     
     def __init__(
-            self, in_channels, out_channels, bias=False, r_t=4, r_c=None, r_a=None, scale=1.0, num_classes=None, num_timesteps=18, num_augments = None,
+            self, in_channels, out_channels, kernel=1, bias=False, r_t=4, r_c=None, r_a=None, scale=1.0, num_classes=None, num_timesteps=18, num_augments = None,
             null_rate=0.0, interpolate=None, fourier=False,
     ):
         super().__init__()
@@ -173,29 +173,30 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
         self.r_a = r_a
         self.in_channels = in_channels
         self.out_channels = out_channels
-        self.conv2d = conv_nd(2, in_channels, out_channels, 1, bias=bias) #conv_nd arguments: dim(selecting ConvNd), c_in, c_out, kernel_size, stride, padding, dilation, groups, bias
+        self.kernel = kernel
+        self.conv2d = conv_nd(2, in_channels, out_channels, kernel, padding=kernel//2 if kernel>1 else 0, bias=bias) #conv_nd arguments: dim(selecting ConvNd), c_in, c_out, kernel_size, stride, padding, dilation, groups, bias
         self.num_classes = num_classes
         self.num_timesteps = num_timesteps
         self.num_augments = num_augments
 
         if self.r_c is not None:
-            self.c_lora_down = conv_nd(2, in_channels, r_c * num_classes, 1, bias=False)
-            self.c_lora_up = conv_nd(2, r_c * num_classes, out_channels, 1, bias=False)
+            self.c_lora_down = conv_nd(2, in_channels, r_c * num_classes, kernel, padding=kernel//2 if kernel>1 else 0, bias=False)
+            self.c_lora_up = conv_nd(2, r_c * num_classes, out_channels, kernel, padding=kernel//2 if kernel>1 else 0, bias=False)
 
             nn.init.normal_(self.c_lora_down.weight, std=1 / r_c)
             nn.init.zeros_(self.c_lora_up.weight)
             self.c_bias = nn.Parameter(torch.zeros((self.r_c * self.num_classes, self.out_channels)))
 
         if self.r_a is not None:
-            self.a_lora_down = conv_nd(2, in_channels, r_a * num_augments, 1, bias=False)
-            self.a_lora_up = conv_nd(2, r_a * num_augments, out_channels, 1, bias=False)
+            self.a_lora_down = conv_nd(2, in_channels, r_a * num_augments, kernel, padding=kernel//2 if kernel>1 else 0, bias=False)
+            self.a_lora_up = conv_nd(2, r_a * num_augments, out_channels, kernel, padding=kernel//2 if kernel>1 else 0, bias=False)
 
             nn.init.normal_(self.a_lora_down.weight, std=1 / r_a)
             nn.init.zeros_(self.a_lora_up.weight)
             self.a_bias = nn.Parameter(torch.zeros((self.r_a * self.num_augments, self.out_channels)))
 
-        self.t_lora_down = conv_nd(2, in_channels, r_t * num_timesteps, 1, bias=False)
-        self.t_lora_up = conv_nd(2, r_t * num_timesteps, out_channels, 1, bias=False)
+        self.t_lora_down = conv_nd(2, in_channels, r_t * num_timesteps, kernel, padding=kernel//2 if kernel>1 else 0, bias=False)
+        self.t_lora_up = conv_nd(2, r_t * num_timesteps, out_channels, kernel, padding=kernel//2 if kernel>1 else 0,  bias=False)
         nn.init.normal_(self.t_lora_down.weight, std=1 / r_t)
         nn.init.zeros_(self.t_lora_up.weight)
         
@@ -222,15 +223,29 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
     
         if self.interpolate == 'train':
             emb_channels = 128 * 4
+            # self.t_weights = nn.Sequential(
+            #     Linear(in_features=emb_channels, out_features=128),
+            #     GroupNorm(num_channels=128, eps=1e-6),
+            #     torch.nn.SiLU(),
+            #     Linear(in_features=128, out_features=64),
+            #     GroupNorm(num_channels=64, eps=1e-6),
+            #     torch.nn.SiLU(),
+            #     Linear(in_features=64, out_features=num_timesteps),
+            # )
+            
+            if num_timesteps % 3 == 0:
+                num_groups = 3
+            elif num_timesteps % 5 == 0:
+                num_groups = 5
+            else:
+                num_groups = num_timesteps
+
             self.t_weights = nn.Sequential(
-                Linear(in_features=emb_channels, out_features=128),
-                GroupNorm(num_channels=128, eps=1e-6),
-                torch.nn.SiLU(),
-                Linear(in_features=128, out_features=64),
-                GroupNorm(num_channels=64, eps=1e-6),
-                torch.nn.SiLU(),
-                Linear(in_features=64, out_features=num_timesteps),
+            # Linear(in_features=self.emb_channels, out_features=num_timesteps),
+            Linear(in_features=emb_channels, out_features=num_timesteps), #noise channels (t emb이 networks forward에서 Linear 안거치고옴)
+            GroupNorm(num_channels=num_timesteps, num_groups=num_groups, eps=1e-6),
             )
+
             self.t_bias = nn.Parameter(torch.zeros((self.r_t * self.num_timesteps, self.out_channels)))
         else:
             self.t_weights = None
@@ -304,20 +319,7 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
         return
 
     def forward(self, input, emb): #self.interpolate == "train" 외의 예외처리 아직 제대로 안됨
-        if isinstance(emb, tuple):
-            if len(emb) == 4:
-                t = emb[1]
-                a = emb[2]
-                c = emb[3]
-            else:
-                assert len(emb)==3
-                t = emb[1]
-                a = emb[2]
-                c = None
-        else:
-            t = emb
-            a = None
-            c = None             
+        t = emb
         
         # dist.print0(f"a : {a}, asize: {a.size()}")
         # dist.print0(f"c : {c}, cszie : {c.size() if c is not None else None}")
@@ -505,7 +507,8 @@ def inject_trainable_lora(
         model, "UNetBlock", search_class=[Conv2d]
     ):
         # dist.print0(f"{name}")
-        if name in ["qkv", "proj"]:
+        # if name in ["qkv", "proj"]:
+        if name in ["qkv", "proj", "conv1"]:
             
             weight = _child_module.weight
             bias = _child_module.bias
@@ -516,6 +519,7 @@ def inject_trainable_lora(
             _tmp = LoraInjectedConv2d(
                 _child_module.in_channels,
                 _child_module.out_channels,
+                _child_module.kernel,
                 _child_module.bias is not None,
                 r_c=r_c,
                 r_t=r_t,
