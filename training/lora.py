@@ -233,15 +233,12 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
             # )
             self.t_weights = nn.Sequential(
                 Linear(in_features=emb_channels, out_features=128),
-                GroupNorm(num_channels=128, eps=1e-6),
+                # GroupNorm(num_channels=128, eps=1e-6),
                 torch.nn.SiLU(),
-                Linear(in_features=128, out_features=128),
-                GroupNorm(num_channels=128, eps=1e-6),
+                Linear(in_features=128, out_features=64),
+                # GroupNorm(num_channels=64, eps=1e-6),
                 torch.nn.SiLU(),
-                Linear(in_features=128, out_features=128),
-                GroupNorm(num_channels=128, eps=1e-6),
-                torch.nn.SiLU(),
-                Linear(in_features=128, out_features=num_timesteps),
+                Linear(in_features=64, out_features=num_timesteps),
             )
             self.t_bias = nn.Parameter(torch.zeros((self.r_t * self.num_timesteps, self.out_channels)))
         else:
@@ -258,6 +255,7 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
         else:
             self.a_weights = None
 
+        self.lora_norm = GroupNorm(num_channels=out_channels, eps=1e-6)
     
     def set_t_selector(self, ts, reference_points):
         if self.interpolate == "train" :
@@ -358,7 +356,8 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
             out += self.a_lora_up(ab_mask * self.a_lora_down(input)) \
                 * self.ascale + (torch.matmul(b_mask, self.a_bias)).unsqueeze(-1).unsqueeze(-1) * self.ascale
         
-        return out
+        # return out
+        return self.lora_norm(out)
         # dist.print0(f"input size: {input.size()}")
         # dist.print0(f"c_selector size: {self.c_selector.size()}")
         # dist.print0(f"c_lora_down(input) size: {self.c_lora_down(input).size()}")
