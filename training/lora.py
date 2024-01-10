@@ -222,8 +222,20 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
     
         if self.interpolate == 'train':
             emb_channels = 128 * 4
+            # self.t_weights = nn.Sequential(
+            #     Linear(in_features=emb_channels, out_features=128),
+            #     GroupNorm(num_channels=128, eps=1e-6),
+            #     torch.nn.SiLU(),
+            #     Linear(in_features=128, out_features=64),
+            #     GroupNorm(num_channels=64, eps=1e-6),
+            #     torch.nn.SiLU(),
+            #     Linear(in_features=64, out_features=num_timesteps),
+            # )
             self.t_weights = nn.Sequential(
                 Linear(in_features=emb_channels, out_features=128),
+                GroupNorm(num_channels=128, eps=1e-6),
+                torch.nn.SiLU(),
+                Linear(in_features=128, out_features=128),
                 GroupNorm(num_channels=128, eps=1e-6),
                 torch.nn.SiLU(),
                 Linear(in_features=128, out_features=64),
