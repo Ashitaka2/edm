@@ -246,6 +246,18 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
             # GroupNorm(num_channels=num_timesteps, num_groups=num_groups, eps=1e-6),
             # )
             emb_channels = 128 * 4
+            # self.t_weights = nn.Sequential(
+            #     Linear(in_features=emb_channels, out_features=128),
+            #     GroupNorm(num_channels=128, eps=1e-6),
+            #     torch.nn.SiLU(),
+            #     Linear(in_features=128, out_features=128),
+            #     GroupNorm(num_channels=128, eps=1e-6),
+            #     torch.nn.SiLU(),
+            #     Linear(in_features=128, out_features=64),
+            #     GroupNorm(num_channels=64, eps=1e-6),
+            #     torch.nn.SiLU(),
+            #     Linear(in_features=64, out_features=num_timesteps),
+            # )
             self.t_weights = nn.Sequential(
                 Linear(in_features=emb_channels, out_features=128),
                 GroupNorm(num_channels=128, eps=1e-6),
@@ -253,10 +265,7 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
                 Linear(in_features=128, out_features=128),
                 GroupNorm(num_channels=128, eps=1e-6),
                 torch.nn.SiLU(),
-                Linear(in_features=128, out_features=64),
-                GroupNorm(num_channels=64, eps=1e-6),
-                torch.nn.SiLU(),
-                Linear(in_features=64, out_features=num_timesteps),
+                Linear(in_features=128, out_features=num_timesteps),
             )
             self.t_bias = nn.Parameter(torch.zeros((self.r_t * self.num_timesteps, self.out_channels)))
         else:
