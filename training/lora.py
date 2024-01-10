@@ -238,7 +238,7 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
                 Linear(in_features=128, out_features=128),
                 GroupNorm(num_channels=128, eps=1e-6),
                 torch.nn.SiLU(),
-                Linear(in_features=128, out_features=64),
+                Linear(in_features=128, out_features=128),
                 GroupNorm(num_channels=128, eps=1e-6),
                 torch.nn.SiLU(),
                 Linear(in_features=128, out_features=num_timesteps),
