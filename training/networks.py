@@ -177,7 +177,7 @@ class UNetBlock(torch.nn.Module):
         if emb is None:
             assert self.embedding_type == 'no_emb'
         elif 'only_lora' in self.embedding_type:
-            pass
+            x = silu(self.norm1(x))
         else:
             params = self.affine(emb).unsqueeze(2).unsqueeze(3).to(x.dtype)
             if self.adaptive_scale:
