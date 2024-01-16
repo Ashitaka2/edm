@@ -144,13 +144,27 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
 
             nn.init.normal_(self.c_lora_down.weight, std=1 / r_c)
             nn.init.zeros_(self.c_lora_up.weight)
-        
-        # self.t_lora_down = conv_nd(2, in_channels, r_t * num_timesteps, 1, bias=False)
-        # self.t_lora_up = conv_nd(2, r_t * num_timesteps, out_channels, 1, bias=False)
-        # nn.init.normal_(self.t_lora_down.weight, std=1 / r_t)
-        # nn.init.zeros_(self.t_lora_up.weight)
+            self.c_bias = nn.Parameter(torch.zeros((self.r_c * self.num_classes, self.out_channels)))
 
-        self.scale = scale
+        if self.r_a is not None:
+            self.a_lora_down = conv_nd(2, in_channels, r_a * num_augments, 1, bias=False)
+            self.a_lora_up = conv_nd(2, r_a * num_augments, out_channels, 1, bias=False)
+
+            nn.init.normal_(self.a_lora_down.weight, std=1 / r_a)
+            nn.init.zeros_(self.a_lora_up.weight)
+            self.a_bias = nn.Parameter(torch.zeros((self.r_a * self.num_augments, self.out_channels)))
+
+        self.t_lora_down = conv_nd(2, in_channels, r_t * num_timesteps, 1, bias=False)
+        self.t_lora_up = conv_nd(2, r_t * num_timesteps, out_channels, 1, bias=False)
+        nn.init.normal_(self.t_lora_down.weight, std=1 / r_t)
+        nn.init.zeros_(self.t_lora_up.weight)
+        # nn.init.normal_(self.t_lora_up.weight, std = 1 / r_t)
+        
+        scale = 1.0
+        self.tscale = scale
+        self.ascale = scale
+        self.cscale = scale
+        
         self.c_selector = None
         self.t_selector = None
         self.mask = None
@@ -168,6 +182,42 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
 
         self.label_dropout = 0
     
+        if self.interpolate == 'train':
+            emb_channels = 128 * 4
+            # self.t_weights = nn.Sequential(
+            #     Linear(in_features=emb_channels, out_features=128),
+            #     GroupNorm(num_channels=128, eps=1e-6),
+            #     torch.nn.SiLU(),
+            #     Linear(in_features=128, out_features=64),
+            #     GroupNorm(num_channels=64, eps=1e-6),
+            #     torch.nn.SiLU(),
+            #     Linear(in_features=64, out_features=num_timesteps),
+            # )
+            self.t_weights = nn.Sequential(
+                Linear(in_features=emb_channels, out_features=128),
+                # GroupNorm(num_channels=128, eps=1e-6),
+                torch.nn.SiLU(),
+                Linear(in_features=128, out_features=64),
+                # GroupNorm(num_channels=64, eps=1e-6),
+                torch.nn.SiLU(),
+                Linear(in_features=64, out_features=num_timesteps),
+            )
+            self.t_bias = nn.Parameter(torch.zeros((self.r_t * self.num_timesteps, self.out_channels)))
+        else:
+            self.t_weights = None
+        
+        if self.r_a is not None:
+            noise_channels = 128
+            self.a_weights = nn.Sequential(
+                GroupNorm(num_channels=noise_channels, eps=1e-6), 
+                Linear(in_features=noise_channels, out_features=num_augments),
+                # torch.nn.SiLU())
+            )
+            self.a_bias = nn.Parameter(torch.zeros((self.r_a * self.num_augments, self.out_channels)))
+        else:
+            self.a_weights = None
+
+        # self.lora_norm = GroupNorm(num_channels=out_channels, eps=1e-6)
     
     def set_t_selector(self, ts, reference_points):
         #find the closest value in reference_points and display it as one-hot style. self.num_timesteps should be 18 (=len(reference_points))
@@ -222,14 +272,41 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
         self.bypass = bypass
         return
 
-    # def forward(self, input):
-    #     # dist.print0(f"input size: {input.size()}")
-    #     # dist.print0(f"c_selector size: {self.c_selector.size()}")
-    #     # dist.print0(f"c_lora_down(input) size: {self.c_lora_down(input).size()}")
-    #     # dist.print0(f"mask: {self.mask}")
-    #     return self.conv2d(input) \
-    #         + self.c_lora_up(self.c_selector * self.c_lora_down(input)) \
-    #         * self.scale + (torch.matmul(self.mask, self.c_bias)).unsqueeze(-1).unsqueeze(-1) * self.scale
+    def forward(self, input, emb): #self.interpolate == "train" 외의 예외처리 아직 제대로 안됨
+        if isinstance(emb, tuple):
+            if len(emb) == 4:
+                t = emb[1]
+                a = emb[2]
+                c = emb[3]
+            else:
+                assert len(emb)==3
+                t = emb[1]
+                a = emb[2]
+                c = None
+        else:
+            t = emb
+            a = None
+            c = None             
+        
+        # dist.print0(f"a : {a}, asize: {a.size()}")
+        # dist.print0(f"c : {c}, cszie : {c.size() if c is not None else None}")
+        
+        if self.bypass:
+            return self.conv2d(input)
+        
+        # construct t- mask
+        t_mask = self.t_weights(t)
+        tb_mask = torch.repeat_interleave(t_mask, self.r_t, dim=1).to(self.conv2d.weight.device).to(self.conv2d.weight.dtype)
+        tab_mask = torch.repeat_interleave(t_mask, self.r_t, dim=1).unsqueeze(-1).unsqueeze(-1).to(self.conv2d.weight.device).to(self.conv2d.weight.dtype)
+        
+        out = self.conv2d(input) \
+                + self.t_lora_up(tab_mask * self.t_lora_down(input)) \
+                * self.tscale + (torch.matmul(tb_mask, self.t_bias)).unsqueeze(-1).unsqueeze(-1) * self.tscale
+        
+        if self.r_c is not None:
+            self.select_class(c)
+            out += self.c_lora_up(self.c_selector * self.c_lora_down(input)) \
+            * self.cscale + (torch.matmul(self.c_mask, self.c_bias)).unsqueeze(-1).unsqueeze(-1) * self.cscale
 
     # augmentation embedding prototype
     def forward(self, input, emb):
