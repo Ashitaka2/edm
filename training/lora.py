@@ -200,12 +200,9 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
         nn.init.zeros_(self.t_lora_up.weight)
         
         initial_scale = 1.0
-        # self.tscale = initial_scale
-        # self.ascale = initial_scale
-        # self.cscale = initial_scale
-        self.tscale = nn.Parameter(torch.tensor(initial_scale))
-        self.ascale = nn.Parameter(torch.tensor(initial_scale))
-        self.cscale = nn.Parameter(torch.tensor(initial_scale))
+        self.tscale = initial_scale
+        self.ascale = initial_scale
+        self.cscale = initial_scale
         
         self.c_selector = None
         self.t_selector = None
@@ -226,9 +223,13 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
         if self.interpolate == 'train':
             emb_channels = 128 * 4
             self.t_weights = nn.Sequential(
-                GroupNorm(num_channels=emb_channels, eps=1e-6),
-                Linear(in_features=emb_channels, out_features=num_timesteps),
-                # torch.nn.SiLU())
+                Linear(in_features=emb_channels, out_features=128),
+                GroupNorm(num_channels=128, eps=1e-6),
+                torch.nn.SiLU(),
+                Linear(in_features=128, out_features=64),
+                GroupNorm(num_channels=64, eps=1e-6),
+                torch.nn.SiLU(),
+                Linear(in_features=64, out_features=num_timesteps),
             )
             self.t_bias = nn.Parameter(torch.zeros((self.r_t * self.num_timesteps, self.out_channels)))
         else:
@@ -273,9 +274,7 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
             return
 
     def select_class(self, class_labels):
-        
         assert class_labels.size()[-1] == self.num_classes #10개
-        
         self.c_mask = class_labels
         if self.label_dropout:
             self.c_mask = self.c_mask * (torch.rand([class_labels.shape[0], 1], device=class_labels.device) >= self.label_dropout).to(self.mask.dtype)
@@ -288,30 +287,20 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
         self.mask = torch.repeat_interleave(self.mask, self.r_t, dim=1) #size: (B, r_t * num_timesteps)
         return
     
-    # def set_c_selector(self, classes):
-    #     mask = nn.functional.one_hot(classes, self.num_classes)
-    #     if self.null_rate > 0.0:
-    #         null_idx = torch.randint(0, 100, size=(mask.shape[0],)).to(classes.device)
-    #         null_idx = null_idx.ge(100 * self.null_rate)
-    #         mask = null_idx.unsqueeze(1) * mask
-    #     mask = torch.repeat_interleave(mask, self.r_c, dim=1)
-    #     self.c_selector = mask.unsqueeze(2).to(self.conv1d.weight.device).to(self.conv1d.weight.dtype)
-    #     return
-
     def set_bypass(self, bypass):
         self.bypass = bypass
         return
 
     def forward(self, input, emb): #self.interpolate == "train" 외의 예외처리 아직 제대로 안됨
-        if isinstance(emb, tuple):
-            if len(emb) == 4:
-                t = emb[1]
+        if isinstance(emb, tuple): #lemb: emb, cemb, aemb
+            if len(emb) == 3: 
+                t = emb[0]
+                c = emb[1]
                 a = emb[2]
-                c = emb[3]
             else:
-                assert len(emb)==3
-                t = emb[1]
-                a = emb[2]
+                assert len(emb)==2
+                t = emb[0]
+                a = emb[1]
                 c = None
         else:
             t = emb

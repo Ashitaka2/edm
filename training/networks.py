@@ -157,7 +157,7 @@ class UNetBlock(torch.nn.Module):
         self.conv0 = Conv2d(in_channels=in_channels, out_channels=out_channels, kernel=3, up=up, down=down, resample_filter=resample_filter, **init)
         if (embedding_type != 'no_emb') and ('only_lora' not in embedding_type):
             self.affine = Linear(in_features=emb_channels, out_features=out_channels*(2 if adaptive_scale else 1), **init)
-            self.norm1 = GroupNorm(num_channels=out_channels, eps=eps)
+        self.norm1 = GroupNorm(num_channels=out_channels, eps=eps)
         self.conv1 = Conv2d(in_channels=out_channels, out_channels=out_channels, kernel=3, **init_zero)
 
         self.skip = None
@@ -177,10 +177,10 @@ class UNetBlock(torch.nn.Module):
         if emb is None:
             assert self.embedding_type == 'no_emb'
         elif 'only_lora' in self.embedding_type:
-            pass
+            x = silu(self.norm1(x))
         else:
             if isinstance(emb, tuple):
-                lemb = emb #emb, temb, aemb, cemb
+                lemb = emb #emb, cemb, aemb
                 emb = emb[0]
             else:
                 emb = emb
@@ -302,10 +302,6 @@ class SongUNet(torch.nn.Module):
             self.map_layer0 = Linear(in_features=noise_channels, out_features=emb_channels, **init)
             self.map_layer1 = Linear(in_features=emb_channels, out_features=emb_channels, **init)
         
-        self.tmap_layer0 = Linear(in_features=noise_channels, out_features=emb_channels, **init)
-        self.tmap_layer1 = Linear(in_features=emb_channels, out_features=emb_channels, **init)
-        
-        
         # Encoder.
         self.enc = torch.nn.ModuleDict()
         cout = in_channels
@@ -374,8 +370,6 @@ class SongUNet(torch.nn.Module):
         else:
             emb = self.map_noise(noise_labels)
             emb = emb.reshape(emb.shape[0], 2, -1).flip(1).reshape(*emb.shape) # swap sin/cos
-            temb = self.map_noise(noise_labels)
-            temb = temb.reshape(temb.shape[0], 2, -1).flip(1).reshape(*temb.shape) # swap sin/cos
             
             if self.map_label is not None:
                 tmp = class_labels
@@ -393,13 +387,10 @@ class SongUNet(torch.nn.Module):
             emb = silu(self.map_layer0(emb))
             emb = silu(self.map_layer1(emb))
             
-            temb = silu(self.tmap_layer0(temb))
-            temb = silu(self.tmap_layer1(temb))
-            
             if self.map_label is not None:
-                emb = (emb, temb, aemb, cemb)
+                emb = (emb, cemb, aemb)
             else:
-                emb = (emb, temb, aemb)
+                emb = (emb, aemb)
         
         
         # Encoder.
