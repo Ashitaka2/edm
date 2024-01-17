@@ -226,10 +226,10 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
                 Linear(in_features=emb_channels, out_features=128),
                 GroupNorm(num_channels=128, eps=1e-6),
                 torch.nn.SiLU(),
-                Linear(in_features=128, out_features=64),
-                GroupNorm(num_channels=64, eps=1e-6),
+                Linear(in_features=128, out_features=128),
+                GroupNorm(num_channels=128, eps=1e-6),
                 torch.nn.SiLU(),
-                Linear(in_features=64, out_features=num_timesteps),
+                Linear(in_features=128, out_features=num_timesteps+out_channels, init_weight = 0.0),
             )
             # self.t_weights = nn.Sequential(
             #     Linear(in_features=emb_channels, out_features=128),
@@ -338,7 +338,8 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
             return self.conv2d(input)
         
         # construct t- mask
-        t_mask = self.t_weights(t)
+        t_mask, t_scales = torch.tensor_split(self.t_weights(t), (self.num_timesteps, ), dim=1)
+
         tb_mask = torch.repeat_interleave(t_mask, self.r_t, dim=1).to(self.conv2d.weight.device).to(self.conv2d.weight.dtype)
         tab_mask = torch.repeat_interleave(t_mask, self.r_t, dim=1).unsqueeze(-1).unsqueeze(-1).to(self.conv2d.weight.device).to(self.conv2d.weight.dtype)
         
@@ -358,7 +359,7 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
             out += self.a_lora_up(ab_mask * self.a_lora_down(input)) \
                 * self.ascale + (torch.matmul(b_mask, self.a_bias)).unsqueeze(-1).unsqueeze(-1) * self.ascale
         
-        return out
+        return out * (1 + t_scales.unsqueeze(-1).unsqueeze(-1))
         # dist.print0(f"input size: {input.size()}")
         # dist.print0(f"c_selector size: {self.c_selector.size()}")
         # dist.print0(f"c_lora_down(input) size: {self.c_lora_down(input).size()}")
