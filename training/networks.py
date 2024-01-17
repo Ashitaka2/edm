@@ -157,7 +157,7 @@ class UNetBlock(torch.nn.Module):
         self.conv0 = Conv2d(in_channels=in_channels, out_channels=out_channels, kernel=3, up=up, down=down, resample_filter=resample_filter, **init)
         if (embedding_type != 'no_emb') and ('only_lora' not in embedding_type):
             self.affine = Linear(in_features=emb_channels, out_features=out_channels*(2 if adaptive_scale else 1), **init)
-            self.norm1 = GroupNorm(num_channels=out_channels, eps=eps)
+        self.norm1 = GroupNorm(num_channels=out_channels, eps=eps)
         self.conv1 = Conv2d(in_channels=out_channels, out_channels=out_channels, kernel=3, **init_zero)
 
         self.skip = None
