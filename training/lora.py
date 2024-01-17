@@ -293,12 +293,14 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
 
     def forward(self, input, emb): #self.interpolate == "train" 외의 예외처리 아직 제대로 안됨
         if isinstance(emb, tuple): #lemb: emb, cemb, aemb
-            if len(emb) == 3: 
+            if len(emb) == 3:
+                assert self.r_c is not None
                 t = emb[0]
                 c = emb[1]
                 a = emb[2]
             else:
                 assert len(emb)==2
+                assert self.r_c is None
                 t = emb[0]
                 a = emb[1]
                 c = None
