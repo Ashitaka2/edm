@@ -16,7 +16,6 @@ from torch.nn.functional import silu
 
 from training import lora 
 from training.lora import LoraInjectedConv2d
-from training.lora import select_class_for_lora
 
 #----------------------------------------------------------------------------
 # Unified routine for initializing weights and biases.
@@ -62,6 +61,7 @@ class Conv2d(torch.nn.Module):
         self.out_channels = out_channels
         self.up = up
         self.down = down
+        self.kernel = kernel
         self.fused_resample = fused_resample
         init_kwargs = dict(mode=init_mode, fan_in=in_channels*kernel*kernel, fan_out=out_channels*kernel*kernel)
         self.weight = torch.nn.Parameter(weight_init([out_channels, in_channels, kernel, kernel], **init_kwargs) * init_weight) if kernel else None
@@ -141,7 +141,7 @@ class UNetBlock(torch.nn.Module):
         in_channels, out_channels, emb_channels, up=False, down=False, attention=False,
         num_heads=None, channels_per_head=64, dropout=0, skip_scale=1, eps=1e-5,
         resample_filter=[1,1], resample_proj=False, adaptive_scale=True,
-        init=dict(), init_zero=dict(init_weight=0), init_attn=None, embedding_type='no_emb'
+        init=dict(), init_zero=dict(init_weight=0), init_attn=None, embedding_type='no_emb', res_cond = 'SC', attn_cond = 'lora',
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -152,11 +152,16 @@ class UNetBlock(torch.nn.Module):
         self.skip_scale = skip_scale
         self.adaptive_scale = adaptive_scale
         self.embedding_type = embedding_type
+        self.res_cond = res_cond
+        self.attn_cond = attn_cond
 
         self.norm0 = GroupNorm(num_channels=in_channels, eps=eps)
         self.conv0 = Conv2d(in_channels=in_channels, out_channels=out_channels, kernel=3, up=up, down=down, resample_filter=resample_filter, **init)
-        if (embedding_type != 'no_emb') and ('only_lora' not in embedding_type):
-            self.affine = Linear(in_features=emb_channels, out_features=out_channels*(2 if adaptive_scale else 1), **init)
+        if self.res_cond == 'SC' or self.attn_cond == 'SC':
+            r_ = self.res_cond == 'SC'
+            a_ = self.attn_cond == 'SC'
+            s_ = adaptive_scale
+            self.affine = Linear(in_features=emb_channels, out_features=out_channels*(a_*(2*s_+1)+r_*(s_+1)), **init)
         self.norm1 = GroupNorm(num_channels=out_channels, eps=eps)
         self.conv1 = Conv2d(in_channels=out_channels, out_channels=out_channels, kernel=3, **init_zero)
 
@@ -175,32 +180,71 @@ class UNetBlock(torch.nn.Module):
         x = self.conv0(silu(self.norm0(x)))
 
         if emb is None:
-            assert self.embedding_type == 'no_emb'
-        elif 'only_lora' in self.embedding_type:
-            x = silu(self.norm1(x))
-        else:
+            assert self.res_cond is None and self.attn_cond is None
+        
+        if self.res_cond == 'SC':
+            params = self.affine(emb).unsqueeze(2).unsqueeze(3).to(x.dtype)
+            if self.attn_cond == 'SC':
+                if self.adaptive_scale:
+                    rscale, rshift, ascale, ashift, ascale_ = params.chunk(chunks=5, dim=1)
+                else:
+                    rshift, ashift = params.chunk(chunks=2, dim=1)    
+        
+            else:
+                if self.adaptive_scale:
+                    rscale, rshift = params.chunk(chunks=2, dim=1)
+                else:
+                    rshift = params
+        elif self.attn_cond == 'SC':
             params = self.affine(emb).unsqueeze(2).unsqueeze(3).to(x.dtype)
             if self.adaptive_scale:
-                scale, shift = params.chunk(chunks=2, dim=1)
-                x = silu(torch.addcmul(shift, self.norm1(x), scale + 1))
+                ascale, ashift, ascale_ = params.chunk(chunks=3, dim=1)
             else:
-                x = silu(self.norm1(x.add_(params)))
+                ashift = params
+                
+        elif self.res_cond == 'lora' or self.res_cond is None:
+            x = silu(self.norm1(x))
+        else:
+            assert self.res_cond == 'SC'
+            if self.adaptive_scale:
+                x = silu(torch.addcmul(rshift, self.norm1(x), rscale + 1))
+            else:
+                x = silu(self.norm1(x.add_(rshift)))
 
-        x = self.conv1(torch.nn.functional.dropout(x, p=self.dropout, training=self.training))
+        if isinstance(self.conv1, LoraInjectedConv2d):
+            assert self.res_cond == 'lora'
+            x = self.conv1(torch.nn.functional.dropout(x, p=self.dropout, training=self.training), emb)
+        else:
+            x = self.conv1(torch.nn.functional.dropout(x, p=self.dropout, training=self.training))        
         x = x.add_(self.skip(orig) if self.skip is not None else orig)
         x = x * self.skip_scale
 
         if self.num_heads:
-            if isinstance(self.qkv, LoraInjectedConv2d):
-                q, k, v = self.qkv(self.norm2(x), emb).reshape(x.shape[0] * self.num_heads, x.shape[1] // self.num_heads, 3, -1).unbind(2)
+            if self.attn_cond == 'SC':
+                if self.adaptive_scale:
+                    x = torch.addcmul(ashift, self.norm2(x), ascale + 1)
+                else:
+                    x = self.norm2(x.add_(ashift))
             else:
-                q, k, v = self.qkv(self.norm2(x)).reshape(x.shape[0] * self.num_heads, x.shape[1] // self.num_heads, 3, -1).unbind(2)
+                x = self.norm2(x)
+            
+            if isinstance(self.qkv, LoraInjectedConv2d):
+                q, k, v = self.qkv(x, emb).reshape(x.shape[0] * self.num_heads, x.shape[1] // self.num_heads, 3, -1).unbind(2)
+            else:
+                q, k, v = self.qkv(x).reshape(x.shape[0] * self.num_heads, x.shape[1] // self.num_heads, 3, -1).unbind(2)
             w = AttentionOp.apply(q, k)
             a = torch.einsum('nqk,nck->ncq', w, v)
             if isinstance(self.proj, LoraInjectedConv2d):
                 x = self.proj(a.reshape(*x.shape), emb).add_(x)
             else:
                 x = self.proj(a.reshape(*x.shape)).add_(x)
+            
+            if self.attn_cond == 'SC':
+                if self.adaptive_scale:
+                    x = x * ascale_.unsqueeze(-1).unsqueeze(-1)
+                else:
+                    pass
+            
             x = x * self.skip_scale
         return x
 
@@ -265,8 +309,14 @@ class SongUNet(torch.nn.Module):
         encoder_type        = 'standard',   # Encoder architecture: 'standard' for DDPM++, 'residual' for NCSN++.
         decoder_type        = 'standard',   # Decoder architecture: 'standard' for both DDPM++ and NCSN++.
         resample_filter     = [1,1],        # Resampling filter: [1,1] for DDPM++, [1,3,3,1] for NCSN++.
+        
+        res_cond            = 'SC',         # Residual Block conditioning type : None, Scale-Shift, lora
+        attn_cond           = 'lora',       # Self-attention conditioning type : None, Scale-Shift, lora
     ):
-        assert embedding_type in ['fourier', 'positional', 'no_emb', 'fourier_only_lora', 'positional_only_lora']
+        assert embedding_type in ['fourier', 'positional']
+        assert res_cond in ['SC', 'lora'] or res_cond is None
+        assert attn_cond in ['SC', 'lora'] or attn_cond is None        
+        # assert embedding_type in ['fourier', 'positional', 'no_emb', 'fourier_only_lora', 'positional_only_lora']
         assert encoder_type in ['standard', 'skip', 'residual']
         assert decoder_type in ['standard', 'skip']
 
@@ -280,15 +330,17 @@ class SongUNet(torch.nn.Module):
         block_kwargs = dict(
             emb_channels=emb_channels, num_heads=1, dropout=dropout, skip_scale=np.sqrt(0.5), eps=1e-6,
             resample_filter=resample_filter, resample_proj=True, adaptive_scale=False,
-            init=init, init_zero=init_zero, init_attn=init_attn, embedding_type=embedding_type
+            init=init, init_zero=init_zero, init_attn=init_attn, embedding_type=embedding_type, res_cond=res_cond, attn_cond=attn_cond,
         )
 
         self.embedding_type = embedding_type
+        self.res_cond = res_cond
+        self.attn_cond = attn_cond
         self.noise_channels = noise_channels
         
         
         # Mapping.
-        if self.embedding_type != 'no_emb':
+        if self.res_cond or self.attn_cond is not None:
             self.map_noise = PositionalEmbedding(num_channels=noise_channels, endpoint=True) if 'positional' in embedding_type else FourierEmbedding(num_channels=noise_channels)
             self.map_label = Linear(in_features=label_dim, out_features=noise_channels, **init) if label_dim else None
             self.map_augment = Linear(in_features=augment_dim, out_features=noise_channels, bias=False, **init) if augment_dim else None
@@ -342,7 +394,7 @@ class SongUNet(torch.nn.Module):
 
     def forward(self, x, noise_labels, class_labels, augment_labels=None):
         # Mapping.
-        if self.embedding_type == 'no_emb':
+        if self.res_cond is None and self.attn_cond is None:
             emb = None
         else:
             emb = self.map_noise(noise_labels)
@@ -356,40 +408,6 @@ class SongUNet(torch.nn.Module):
                 emb = emb + self.map_augment(augment_labels)
             emb = silu(self.map_layer0(emb))
             emb = silu(self.map_layer1(emb))
-
-        # # Mapping.
-        # if self.embedding_type == 'no_emb':
-        #     emb = None
-        # else:
-        #     emb = self.map_noise(noise_labels)
-        #     emb = emb.reshape(emb.shape[0], 2, -1).flip(1).reshape(*emb.shape) # swap sin/cos
-        #     temb = self.map_noise(noise_labels)
-        #     temb = temb.reshape(temb.shape[0], 2, -1).flip(1).reshape(*temb.shape) # swap sin/cos
-            
-        #     if self.map_label is not None:
-        #         tmp = class_labels
-        #         if self.training and self.label_dropout:
-        #             tmp = tmp * (torch.rand([x.shape[0], 1], device=x.device) >= self.label_dropout).to(tmp.dtype)
-        #         cemb = tmp
-        #         emb = emb + self.map_label(tmp * np.sqrt(self.map_label.in_features))
-            
-        #     if self.map_augment is not None and augment_labels is not None:
-        #         aemb = self.map_augment(augment_labels)
-        #         emb = emb + aemb
-        #     else:
-        #         aemb = torch.zeros(x.shape[0], self.noise_channels).to(device=x.device)
-                
-        #     emb = silu(self.map_layer0(emb))
-        #     emb = silu(self.map_layer1(emb))
-            
-        #     temb = silu(self.tmap_layer0(temb))
-        #     temb = silu(self.tmap_layer1(temb))
-            
-        #     if self.map_label is not None:
-        #         emb = (emb, temb, aemb, cemb)
-        #     else:
-        #         emb = (emb, temb, aemb)
-        
         
         # Encoder.
         skips = []
@@ -721,10 +739,6 @@ class EDMPrecond(torch.nn.Module):
         c_out = sigma * self.sigma_data / (sigma ** 2 + self.sigma_data ** 2).sqrt()
         c_in = 1 / (self.sigma_data ** 2 + sigma ** 2).sqrt()
         c_noise = sigma.log() / 4
-        
-        # # feed class embedding for cLoRA
-        # select_class_for_lora(self.model, class_labels, num_classes = self.label_dim, verbose=True)
-        
         
         F_x = self.model((c_in * x).to(dtype), c_noise.flatten(), class_labels=class_labels, **model_kwargs)
         assert F_x.dtype == dtype

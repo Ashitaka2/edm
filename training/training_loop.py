@@ -52,17 +52,9 @@ def training_loop(
     resume_kimg         = 0,        # Start from the given training progress.
     cudnn_benchmark     = True,     # Enable torch.backends.cudnn.benchmark?
     device              = torch.device('cuda'),
-    tlora               = False,    # Time-LoRA embedding,
-    num_classes         = None, 
-    num_timesteps       = 18,
-    num_augments        = None, 
-    null_rate           = 0.0,
-    r_c                 = None,
-    r_t                 = None,
-    r_a                 = None,
-    interpolate         = None,
-    fourier=False,
-    no_emb=False,
+    num_basis           = None, 
+    r_lora              = None,
+    lora                = None,
 ):
     # Initialize.
     start_time = time.time()
@@ -102,15 +94,12 @@ def training_loop(
     dist.print0(f'total trainable parameter is {total_params}')
 
     #Apply LoRA
-    if tlora is True:
+    if len(lora) != 0:
         dist.print0('Applying LoRA adapaters...')
-        lora_params, _ = inject_trainable_lora(net, verbose=True, num_classes=num_classes, num_timesteps=num_timesteps, num_augments = num_augments,
-                                        null_rate=null_rate, r_c = r_c, r_t = r_t, r_a=r_a, interpolate=interpolate, fourier=fourier
+        lora_params, _ = inject_trainable_lora(net, verbose=True, num_basis=num_basis, r_lora=r_lora, conditioning=lora,
                                         )
-    
         total_params = sum(p.numel() for p in net.parameters() if p.requires_grad)
         dist.print0(f'total trainable parameter after LoRA application is {total_params}')
-    
 
 
     # Setup optimizer.

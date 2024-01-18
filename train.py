@@ -47,6 +47,9 @@ def parse_int_list(s):
 @click.option('--arch',          help='Network architecture', metavar='ddpmpp|ncsnpp|adm',          type=click.Choice(['ddpmpp', 'ncsnpp', 'adm']), default='ddpmpp', show_default=True)
 @click.option('--precond',       help='Preconditioning & loss function', metavar='vp|ve|edm',       type=click.Choice(['vp', 've', 'edm']), default='edm', show_default=True)
 
+@click.option('--res_cond',      help='Resblock Conditioning type', metavar='None|SC|lora',         type=str, default=None,   show_default=True)
+@click.option('--attn_cond',     help='Attention Conditioning type', metavar='None|SC|lora',        type=str, default=None,   show_default=True)
+
 # Hyperparameters.
 @click.option('--duration',      help='Training duration', metavar='MIMG',                          type=click.FloatRange(min=0, min_open=True), default=200, show_default=True)
 @click.option('--batch',         help='Total batch size', metavar='INT',                            type=click.IntRange(min=1), default=512, show_default=True)
@@ -79,17 +82,8 @@ def parse_int_list(s):
 
 
 #LoRA-related.
-@click.option('--tlora',            help='Apply LoRA (time) adapters',                                type=bool, default=False, show_default=True)
-@click.option('--num_classes',      help='Class numbers',                                             type=int,  default=None,  show_default=True)
-@click.option('--num_timesteps',    help='# of LoRA time adapters',                                   type=int,  default=11,    show_default=True)
-@click.option('--num_augments',     help='# of LoRA augment adapters',                                type=int,  default=11,    show_default=True)
-@click.option('--null_rate',        help='null rate for cLoRA',                                       type=float, default=0.0, show_default=True)
-@click.option('--r_c',              help='cLoRA rank',                                                type=int,  default=None, show_default=True)
-@click.option('--r_t',              help='tLoRA rank',                                                type=int,  default=None, show_default=True)
-@click.option('--r_a',              help='aLoRA rank',                                                type=int,  default=None, show_default=True)
-@click.option('--interpolate',      help='tLoRA adapter interpolate scheme',                          type=str, default=None, show_default=True)
-@click.option('--fourier',          help='tLoRA fourier feature',                                     type=bool, default=False, show_default=True)
-@click.option('--embedding_type',   help='removing conventional embedding',                           type=str, default=None, show_default=True)
+@click.option('--num_basis',        help='# of LoRA adapters',                                      type=int,  default=None,  show_default=True)
+@click.option('--r_lora',           help='LoRA adapter rank',                                       type=int,  default=None,  show_default=True)
 
 def main(**kwargs):
     """Train diffusion-based generative model using the techniques described in the
@@ -128,23 +122,14 @@ def main(**kwargs):
 
     # Network architecture.
     if opts.arch == 'ddpmpp':
-        if opts.embedding_type is None:
-            embedding_type = 'positional'
-        else:
-            embedding_type = opts.embedding_type
-        c.network_kwargs.update(model_type='SongUNet', embedding_type=embedding_type, encoder_type='standard', decoder_type='standard')
+        c.network_kwargs.update(model_type='SongUNet', embedding_type='positional', encoder_type='standard', decoder_type='standard')
         c.network_kwargs.update(channel_mult_noise=1, resample_filter=[1,1], model_channels=128, channel_mult=[2,2,2])
     elif opts.arch == 'ncsnpp':
-        if opts.embedding_type is None:
-            embedding_type = 'fourier'
-        else:
-            embedding_type = opts.embedding_type
-        c.network_kwargs.update(model_type='SongUNet', embedding_type=embedding_type, encoder_type='residual', decoder_type='standard')
+        c.network_kwargs.update(model_type='SongUNet', embedding_type='fourier', encoder_type='residual', decoder_type='standard')
         c.network_kwargs.update(channel_mult_noise=2, resample_filter=[1,3,3,1], model_channels=128, channel_mult=[2,2,2])
     else:
         assert opts.arch == 'adm'
         c.network_kwargs.update(model_type='DhariwalUNet', model_channels=192, channel_mult=[1,2,3,4])
-        
         
     # Preconditioning & loss function.
     if opts.precond == 'vp':
@@ -168,6 +153,7 @@ def main(**kwargs):
         c.augment_kwargs.update(xflip=1e8, yflip=1, scale=1, rotate_frac=1, aniso=1, translate_frac=1)
         c.network_kwargs.augment_dim = 9
     c.network_kwargs.update(dropout=opts.dropout, use_fp16=opts.fp16)
+    c.network_kwargs.update(res_cond=opts.res_cond, attn_cond=opts.attn_cond)
 
     # Training options.
     c.total_kimg = max(int(opts.duration * 1000), 1)
@@ -222,16 +208,13 @@ def main(**kwargs):
 
 
     # Apply LoRA adapters
-    c.tlora = opts.tlora
-    c.num_classes = opts.num_classes
-    c.num_timesteps = opts.num_timesteps
-    c.num_augments = opts.num_augments
-    c.null_rate = opts.null_rate
-    c.r_c = opts.r_c
-    c.r_t = opts.r_t
-    c.r_a = opts.r_a
-    c.interpolate = opts.interpolate
-    c.fourier = opts.fourier
+    c.num_basis = opts.num_basis
+    c.r_lora = opts.r_lora
+    c.lora = []
+    if opts.res_cond == "lora":
+        c.lora.append('res')
+    if opts.attn_cond == "lora":
+        c.lora.append('attn')
 
 
     # Print options.
@@ -247,7 +230,10 @@ def main(**kwargs):
     dist.print0(f'Number of GPUs:          {dist.get_world_size()}')
     dist.print0(f'Batch size:              {c.batch_size}')
     dist.print0(f'Mixed-precision:         {c.network_kwargs.use_fp16}')
-    dist.print0()
+    dist.print0(f'Residual Block conditioning type: {c.network_kwargs.res_cond}')
+    dist.print0(f'Attention Block conditioning type: {c.network_kwargs.attn_cond}')
+    dist.print0(f'LoRA basis number:       {c.num_basis}')
+    dist.print0(f'LoRA rank :              {c.r_lora}')
 
     # Dry run?
     if opts.dry_run:
