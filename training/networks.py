@@ -176,12 +176,8 @@ class UNetBlock(torch.nn.Module):
             self.proj = Conv2d(in_channels=out_channels, out_channels=out_channels, kernel=1, **init_zero)
 
     def forward(self, x, emb):
-        orig = x
-        x = self.conv0(silu(self.norm0(x)))
-
-        if emb is None:
-            assert self.res_cond is None and self.attn_cond is None
         
+        #Scale-Shift가 있을 경우, affine layer를 통과시켜서 params를 만들고 분할
         if self.res_cond == 'SC':
             params = self.affine(emb).unsqueeze(2).unsqueeze(3).to(x.dtype)
             if self.attn_cond == 'SC':
@@ -201,7 +197,17 @@ class UNetBlock(torch.nn.Module):
                 ascale, ashift, ascale_ = params.chunk(chunks=3, dim=1)
             else:
                 ashift = params
-                
+        else:
+            pass
+        
+        #original forward path
+        orig = x
+        x = self.conv0(silu(self.norm0(x)))
+        
+        #residual forward path
+        if emb is None:
+            assert self.res_cond is None and self.attn_cond is None
+            pass
         elif self.res_cond == 'lora' or self.res_cond is None:
             x = silu(self.norm1(x))
         else:
@@ -219,6 +225,7 @@ class UNetBlock(torch.nn.Module):
         x = x.add_(self.skip(orig) if self.skip is not None else orig)
         x = x * self.skip_scale
 
+        #self-attention forward path
         if self.num_heads:
             if self.attn_cond == 'SC':
                 if self.adaptive_scale:

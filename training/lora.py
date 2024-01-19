@@ -206,7 +206,6 @@ def inject_trainable_lora(
         targets.append("qkv")
         targets.append("proj")
     
-    print(f"target is {targets}")
     from .networks import Conv2d
     for _module, name, _child_module in _find_modules(
         model, target_replace_module , search_class=[Conv2d]
