@@ -157,11 +157,17 @@ class UNetBlock(torch.nn.Module):
 
         self.norm0 = GroupNorm(num_channels=in_channels, eps=eps)
         self.conv0 = Conv2d(in_channels=in_channels, out_channels=out_channels, kernel=3, up=up, down=down, resample_filter=resample_filter, **init)
+        
         if self.res_cond == 'SC' or self.attn_cond == 'SC':
-            r_ = self.res_cond == 'SC'
-            a_ = self.attn_cond == 'SC'
-            s_ = adaptive_scale
-            self.affine = Linear(in_features=emb_channels, out_features=out_channels*(a_*(2*s_+1)+r_*(s_+1)), **init)
+            if self.num_heads:
+                r_ = self.res_cond == 'SC'
+                a_ = self.attn_cond == 'SC'
+                s_ = adaptive_scale
+                self.affine = Linear(in_features=emb_channels, out_features=out_channels*(3*a_ + r_*(s_+1)), **init)
+            elif self.res_cond == 'SC':
+                s_ = adaptive_scale
+                self.affine = Linear(in_features=emb_channels, out_features=out_channels*(s_+1), **init)
+        
         self.norm1 = GroupNorm(num_channels=out_channels, eps=eps)
         self.conv1 = Conv2d(in_channels=out_channels, out_channels=out_channels, kernel=3, **init_zero)
 
@@ -176,38 +182,31 @@ class UNetBlock(torch.nn.Module):
             self.proj = Conv2d(in_channels=out_channels, out_channels=out_channels, kernel=1, **init_zero)
 
     def forward(self, x, emb):
-        
-        #Scale-Shift가 있을 경우, affine layer를 통과시켜서 params를 만들고 분할
-        if self.res_cond == 'SC':
-            params = self.affine(emb).unsqueeze(2).unsqueeze(3).to(x.dtype)
-            if self.attn_cond == 'SC':
+        # self.affine apply
+        if self.attn_cond == 'SC' and self.num_heads:
+            if self.res_cond == 'SC':
                 if self.adaptive_scale:
                     rscale, rshift, ascale, ashift, ascale_ = params.chunk(chunks=5, dim=1)
                 else:
-                    rshift, ashift = params.chunk(chunks=2, dim=1)    
-        
+                    rshift, ascale, ashift, ascale_ = params.chunk(chunks=4, dim=1)    
             else:
-                if self.adaptive_scale:
-                    rscale, rshift = params.chunk(chunks=2, dim=1)
-                else:
-                    rshift = params
-        elif self.attn_cond == 'SC':
+                params = self.affine(emb).unsqueeze(2).unsqueeze(3).to(x.dtype)
+                ascale, ashift, ascale_ = params.chunk(chunks=3, dim=1)
+
+        elif self.res_cond == 'SC':
             params = self.affine(emb).unsqueeze(2).unsqueeze(3).to(x.dtype)
             if self.adaptive_scale:
-                ascale, ashift, ascale_ = params.chunk(chunks=3, dim=1)
+                rscale, rshift = params.chunk(chunks=2, dim=1)
             else:
-                ashift = params
-        else:
-            pass
+                rshift = params
         
-        #original forward path
+        # forward start
         orig = x
         x = self.conv0(silu(self.norm0(x)))
         
-        #residual forward path
         if emb is None:
             assert self.res_cond is None and self.attn_cond is None
-            pass
+            x = silu(self.norm1(x))
         elif self.res_cond == 'lora' or self.res_cond is None:
             x = silu(self.norm1(x))
         else:
@@ -225,17 +224,14 @@ class UNetBlock(torch.nn.Module):
         x = x.add_(self.skip(orig) if self.skip is not None else orig)
         x = x * self.skip_scale
 
-        #self-attention forward path
         if self.num_heads:
             if self.attn_cond == 'SC':
-                if self.adaptive_scale:
-                    x = torch.addcmul(ashift, self.norm2(x), ascale + 1)
-                else:
-                    x = self.norm2(x.add_(ashift))
+                x = torch.addcmul(ashift, self.norm2(x), ascale + 1)
             else:
                 x = self.norm2(x)
             
             if isinstance(self.qkv, LoraInjectedConv2d):
+                assert self.attn_cond == 'lora'
                 q, k, v = self.qkv(x, emb).reshape(x.shape[0] * self.num_heads, x.shape[1] // self.num_heads, 3, -1).unbind(2)
             else:
                 q, k, v = self.qkv(x).reshape(x.shape[0] * self.num_heads, x.shape[1] // self.num_heads, 3, -1).unbind(2)
@@ -245,12 +241,8 @@ class UNetBlock(torch.nn.Module):
                 x = self.proj(a.reshape(*x.shape), emb).add_(x)
             else:
                 x = self.proj(a.reshape(*x.shape)).add_(x)
-            
             if self.attn_cond == 'SC':
-                if self.adaptive_scale:
-                    x = x * ascale_.unsqueeze(-1).unsqueeze(-1)
-                else:
-                    pass
+                x = x * ascale_
             
             x = x * self.skip_scale
         return x
