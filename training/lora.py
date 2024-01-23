@@ -316,7 +316,6 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
         return
 
     def forward(self, input, emb): #self.interpolate == "train" 외의 예외처리 아직 제대로 안됨
-        print(f"emb size is: {emb.shape}")
         if isinstance(emb, tuple):
             if len(emb) == 4:
                 t = emb[1]
