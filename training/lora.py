@@ -316,6 +316,7 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
         return
 
     def forward(self, input, emb): #self.interpolate == "train" 외의 예외처리 아직 제대로 안됨
+        print(f"emb size is: {emb.shape}")
         if isinstance(emb, tuple):
             if len(emb) == 4:
                 t = emb[1]
@@ -358,6 +359,7 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
             out += self.a_lora_up(ab_mask * self.a_lora_down(input)) \
                 * self.ascale + (torch.matmul(b_mask, self.a_bias)).unsqueeze(-1).unsqueeze(-1) * self.ascale
         
+        dist.print0(f"out is : {out[0][1][2][3]}")
         return out
         # dist.print0(f"input size: {input.size()}")
         # dist.print0(f"c_selector size: {self.c_selector.size()}")
