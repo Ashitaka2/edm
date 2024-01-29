@@ -258,7 +258,7 @@ class SongUNet(torch.nn.Module):
         num_blocks          = 4,            # Number of residual blocks per resolution.
         attn_resolutions    = [16],         # List of resolutions with self-attention.
         dropout             = 0.10,         # Dropout probability of intermediate activations.
-        label_dropout       = 0,            # Dropout probability of class labels for classifier-free guidance.
+        label_dropout       = 0.,            # Dropout probability of class labels for classifier-free guidance.
 
         embedding_type      = 'positional', # Timestep embedding type: 'positional' for DDPM++, 'fourier' for NCSN++.
         channel_mult_noise  = 1,            # Timestep embedding size: 1 for DDPM++, 2 for NCSN++.
