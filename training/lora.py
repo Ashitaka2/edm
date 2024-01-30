@@ -42,7 +42,6 @@ class Linear(torch.nn.Module):
             x = x.add_(self.bias.to(x.dtype))
         return x
 
-
 @persistence.persistent_class
 class GroupNorm(torch.nn.Module):
     def __init__(self, num_channels, num_groups=32, min_channels_per_group=4, eps=1e-5):
@@ -58,52 +57,6 @@ class GroupNorm(torch.nn.Module):
                                            bias=self.bias.to(x.dtype), eps=self.eps)
         return x
 
-class FourierFeatures(nn.Module):
-    """Random Fourier features.
-    Args:
-        frequency_matrix (torch.Tensor): Matrix of frequencies to use
-            for Fourier features. Shape (num_frequencies, num_coordinates).
-            This is referred to as B in the paper.
-        learnable_features (bool): If True, fourier features are learnable,
-            otherwise they are fixed.
-    """
-    def __init__(self, frequency_matrix, learnable_features=False):
-        super(FourierFeatures, self).__init__()
-        if learnable_features:
-            self.frequency_matrix = nn.Parameter(frequency_matrix)
-        else:
-            # Register buffer adds a key to the state dict of the model. This will
-            # track the attribute without registering it as a learnable parameter.
-            # We require this so frequency matrix will also be moved to GPU when
-            # we call .to(device) on the model
-            self.register_buffer('frequency_matrix', frequency_matrix)
-        self.learnable_features = learnable_features
-        self.num_frequencies = frequency_matrix.shape[0]
-        # Factor of 2 since we consider both a sine and cosine encoding
-        self.feature_dim = 2 * self.num_frequencies
-
-    def forward(self, coordinates):
-        """Creates Fourier features from coordinates.
-
-        Args:
-            coordinates (torch.Tensor): Shape (num_points, coordinate_dim)
-        """
-        # The coordinates variable contains a batch of vectors of dimension
-        # coordinate_dim. We want to perform a matrix multiply of each of these
-        # vectors with the frequency matrix. I.e. given coordinates of
-        # shape (num_points, coordinate_dim) we perform a matrix multiply by
-        # the transposed frequency matrix of shape (coordinate_dim, num_frequencies)
-        # to obtain an output of shape (num_points, num_frequencies).
-        # print('self.frequency_matrix.shape: ', self.frequency_matrix.shape)
-        # print('coordinates.shape: ', coordinates.shape)
-        prefeatures = torch.matmul(coordinates, self.frequency_matrix.T)
-        # print('prefeatures.shape: ', prefeatures.shape)
-        # Calculate cosine and sine features
-        cos_features = torch.cos(2 * math.pi * prefeatures)
-        sin_features = torch.sin(2 * math.pi * prefeatures)
-        # Concatenate sine and cosine features
-        return torch.cat((cos_features, sin_features), dim=-1)
-
 def conv_nd(dims, *args, **kwargs):
     """
     Create a 1D, 2D, or 3D convolution module.
@@ -115,48 +68,6 @@ def conv_nd(dims, *args, **kwargs):
     elif dims == 3:
         return nn.Conv3d(*args, **kwargs)
     raise ValueError(f"unsupported dimensions: {dims}")
-
-class SimpleEmbedding(nn.Module):
-    def __init__(self, output_size):
-        super(SimpleEmbedding, self).__init__()
-        self.layer1 = nn.Linear(1, 64)
-        self.layer2 = nn.Linear(64, 128) 
-        self.layer3 = nn.Linear(128, 64)  
-        self.layer4 = nn.Linear(64, output_size)
-
-        self.silu = nn.SiLU()
-
-    def forward(self, x):
-        x = self.silu(self.layer1(x))
-        x = self.silu(self.layer2(x))
-        x = self.silu(self.layer3(x))
-        x = self.layer4(x)
-        return F.softmax(x, dim=1)
-        # return x
-
-
-class FourierEmbedding(nn.Module):
-    def __init__(self, num_frequency, output_size):
-        super(FourierEmbedding, self).__init__()
-        frequency_matrix = torch.normal(mean=torch.zeros(num_frequency, 1), std=2.0)
-        self.fourier_feature = FourierFeatures(frequency_matrix)
-        
-#         self.layer1 = nn.Linear(1, 64)
-        self.layer2 = nn.Linear(2*num_frequency, 128) 
-        self.layer3 = nn.Linear(128, 64)  
-        self.layer4 = nn.Linear(64, output_size)
-
-        self.silu = nn.SiLU()
-
-    def forward(self, x):
-        fourier_coords = self.fourier_feature(x)
-#         x = self.silu(self.layer1(x))
-        x = self.silu(self.layer2(fourier_coords))
-        x = self.silu(self.layer3(x))
-        x = self.layer4(x)
-        return F.softmax(x, dim=1)
-        # return x
-
 
 class LoraInjectedConv2d(nn.Module): #for cLoRA
     
@@ -186,20 +97,22 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
             nn.init.zeros_(self.c_lora_up.weight)
             self.c_bias = nn.Parameter(torch.zeros((self.r_c * self.num_classes, self.out_channels)))
 
-        if self.r_a is not None:
-            self.a_lora_down = conv_nd(2, in_channels, r_a * num_augments, 1, bias=False)
-            self.a_lora_up = conv_nd(2, r_a * num_augments, out_channels, 1, bias=False)
+        # if self.r_a is not None:
+        #     self.a_lora_down = conv_nd(2, in_channels, r_a * num_augments, 1, bias=False)
+        #     self.a_lora_up = conv_nd(2, r_a * num_augments, out_channels, 1, bias=False)
 
-            nn.init.normal_(self.a_lora_down.weight, std=1 / r_a)
-            nn.init.zeros_(self.a_lora_up.weight)
-            self.a_bias = nn.Parameter(torch.zeros((self.r_a * self.num_augments, self.out_channels)))
+        #     nn.init.normal_(self.a_lora_down.weight, std=1 / r_a)
+        #     nn.init.zeros_(self.a_lora_up.weight)
+        #     self.a_bias = nn.Parameter(torch.zeros((self.r_a * self.num_augments, self.out_channels)))
 
-        self.t_lora_down = conv_nd(2, in_channels, r_t * num_timesteps, 1, bias=False)
-        self.t_lora_up = conv_nd(2, r_t * num_timesteps, out_channels, 1, bias=False)
-        nn.init.normal_(self.t_lora_down.weight, std=1 / r_t)
-        nn.init.zeros_(self.t_lora_up.weight)
+        # if self.r_t is not None:
+        #     self.t_lora_down = conv_nd(2, in_channels, r_t * num_timesteps, 1, bias=False)
+        #     self.t_lora_up = conv_nd(2, r_t * num_timesteps, out_channels, 1, bias=False)
+        #     nn.init.normal_(self.t_lora_down.weight, std=1 / r_t)
+        #     nn.init.zeros_(self.t_lora_up.weight)
         
         scale = 1.0
+        self.scale = scale
         self.tscale = scale
         self.ascale = scale
         self.cscale = scale
@@ -286,77 +199,45 @@ class LoraInjectedConv2d(nn.Module): #for cLoRA
             return
 
     def select_class(self, class_labels):
-        
         assert class_labels.size()[-1] == self.num_classes #10개
-        
         self.c_mask = class_labels
         if self.label_dropout:
             self.c_mask = self.c_mask * (torch.rand([class_labels.shape[0], 1], device=class_labels.device) >= self.label_dropout).to(self.mask.dtype)
-        self.c_mask = torch.repeat_interleave(self.c_mask, self.r_c, dim=1)
-        self.c_selector = self.c_mask.unsqueeze(-1).unsqueeze(-1).to(self.conv2d.weight.device).to(self.conv2d.weight.dtype)
-        
-    def simple_embedding(self, ts):
-        ts = ts.to(device=self.conv2d.weight.device, dtype=self.conv2d.weight.dtype).unsqueeze(1)  # Shape: [N, 1]
-        self.mask = self.embedding(ts).to(self.conv2d.weight.device).to(self.conv2d.weight.dtype) 
-        self.mask = torch.repeat_interleave(self.mask, self.r_t, dim=1) #size: (B, r_t * num_timesteps)
-        return
-    
-    # def set_c_selector(self, classes):
-    #     mask = nn.functional.one_hot(classes, self.num_classes)
-    #     if self.null_rate > 0.0:
-    #         null_idx = torch.randint(0, 100, size=(mask.shape[0],)).to(classes.device)
-    #         null_idx = null_idx.ge(100 * self.null_rate)
-    #         mask = null_idx.unsqueeze(1) * mask
-    #     mask = torch.repeat_interleave(mask, self.r_c, dim=1)
-    #     self.c_selector = mask.unsqueeze(2).to(self.conv1d.weight.device).to(self.conv1d.weight.dtype)
-    #     return
+        self.c_mask = torch.repeat_interleave(self.c_mask, self.r_c, dim=1) # [B, 40]
+        self.c_selector = self.c_mask.unsqueeze(-1).unsqueeze(-1).to(self.conv2d.weight.device).to(self.conv2d.weight.dtype) #[B, 40, 1, 1]
 
     def set_bypass(self, bypass):
         self.bypass = bypass
         return
 
-    def forward(self, input, emb): #self.interpolate == "train" 외의 예외처리 아직 제대로 안됨
-        if isinstance(emb, tuple):
-            if len(emb) == 4:
-                t = emb[1]
-                a = emb[2]
-                c = emb[3]
-            else:
-                assert len(emb)==3
-                t = emb[1]
-                a = emb[2]
-                c = None
-        else:
-            t = emb
-            a = None
-            c = None             
-        
+    def forward(self, input):
         # dist.print0(f"a : {a}, asize: {a.size()}")
         # dist.print0(f"c : {c}, cszie : {c.size() if c is not None else None}")
         
         if self.bypass:
             return self.conv2d(input)
         
+        out = self.conv2d(input)
+
+        # if self.r_t is not None:
         # construct t- mask
-        t_mask = self.t_weights(t)
-        tb_mask = torch.repeat_interleave(t_mask, self.r_t, dim=1).to(self.conv2d.weight.device).to(self.conv2d.weight.dtype)
-        tab_mask = torch.repeat_interleave(t_mask, self.r_t, dim=1).unsqueeze(-1).unsqueeze(-1).to(self.conv2d.weight.device).to(self.conv2d.weight.dtype)
-        
-        out = self.conv2d(input) \
-                + self.t_lora_up(tab_mask * self.t_lora_down(input)) \
-                * self.tscale + (torch.matmul(tb_mask, self.t_bias)).unsqueeze(-1).unsqueeze(-1) * self.tscale
+            # t_mask = self.t_weights(t)
+            # tb_mask = torch.repeat_interleave(t_mask, self.r_t, dim=1).to(self.conv2d.weight.device).to(self.conv2d.weight.dtype)
+            # tab_mask = torch.repeat_interleave(t_mask, self.r_t, dim=1).unsqueeze(-1).unsqueeze(-1).to(self.conv2d.weight.device).to(self.conv2d.weight.dtype)
+            # out += self.t_lora_up(tab_mask * self.t_lora_down(input)) \
+            #     * self.tscale + (torch.matmul(tb_mask, self.t_bias)).unsqueeze(-1).unsqueeze(-1) * self.tscale
         
         if self.r_c is not None:
-            self.select_class(c)
+            # self.select_class(c)
             out += self.c_lora_up(self.c_selector * self.c_lora_down(input)) \
-            * self.cscale + (torch.matmul(self.c_mask, self.c_bias)).unsqueeze(-1).unsqueeze(-1) * self.cscale
+            * self.scale + (torch.matmul(self.c_mask, self.c_bias)).unsqueeze(-1).unsqueeze(-1) * self.scale
 
-        if self.r_a is not None:
-            a_mask = self.a_weights(a)
-            b_mask = torch.repeat_interleave(a_mask, self.r_a, dim=1).to(self.conv2d.weight.device).to(self.conv2d.weight.dtype)
-            ab_mask = torch.repeat_interleave(a_mask, self.r_a, dim=1).unsqueeze(-1).unsqueeze(-1).to(self.conv2d.weight.device).to(self.conv2d.weight.dtype)
-            out += self.a_lora_up(ab_mask * self.a_lora_down(input)) \
-                * self.ascale + (torch.matmul(b_mask, self.a_bias)).unsqueeze(-1).unsqueeze(-1) * self.ascale
+        # if self.r_a is not None:
+        #     a_mask = self.a_weights(a)
+        #     b_mask = torch.repeat_interleave(a_mask, self.r_a, dim=1).to(self.conv2d.weight.device).to(self.conv2d.weight.dtype)
+        #     ab_mask = torch.repeat_interleave(a_mask, self.r_a, dim=1).unsqueeze(-1).unsqueeze(-1).to(self.conv2d.weight.device).to(self.conv2d.weight.dtype)
+        #     out += self.a_lora_up(ab_mask * self.a_lora_down(input)) \
+        #         * self.ascale + (torch.matmul(b_mask, self.a_bias)).unsqueeze(-1).unsqueeze(-1) * self.ascale
         
         return out
         # dist.print0(f"input size: {input.size()}")
