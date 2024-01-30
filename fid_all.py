@@ -8,6 +8,7 @@
 """Script for calculating Frechet Inception Distance (FID)."""
 
 import os
+import json
 import click
 import tqdm
 import pickle
@@ -110,11 +111,18 @@ def calc(image_path, ref_path, num_expected, seed, batch):
 
     mu, sigma = calculate_inception_stats(image_path=image_path, num_expected=num_expected, seed=seed, max_batch_size=batch)
     dist.print0('Calculating FID...')
+    fid = None
     if dist.get_rank() == 0:
         fid = calculate_fid_from_inception_stats(mu, sigma, ref['mu'], ref['sigma'])
         print(f'{fid:g}')
     torch.distributed.barrier()
+    return fid
 
+def write_fid_scores_to_json(fid_scores, output_path):
+    """Write the FID scores to a JSON file."""
+    with open(output_path, 'w') as file:
+        json.dump(fid_scores, file, indent=4)
+    dist.print0("json file save complete.")
 
 #----------------------------------------------------------------------------
 
@@ -127,8 +135,17 @@ def calc(image_path, ref_path, num_expected, seed, batch):
 def main(image_paths, ref_path, num_expected, seed, batch):
     torch.multiprocessing.set_start_method('spawn')
     path_list = get_subdirectories(image_paths)
+    fid_scores = {"fid": {}}
+    
     for image_path in path_list:
-        calc(image_path, ref_path, num_expected, seed, batch)
+        directory_name = os.path.basename(image_path)
+        fid_score = calc(image_path, ref_path, num_expected, seed, batch) # multi-gpu barrier handled inside 'calc' funciton.
+        if fid_score is not None and dist.get_rank()==0:
+            fid_scores["fid"][directory_name] = fid_score    
+            
+    if dist.get_rank()==0: # only rank=0 gpu writes the json file 
+        output_json_path = os.path.join(image_paths, "fid_scores.json")
+        write_fid_scores_to_json(fid_scores, output_json_path)
 
 
 #----------------------------------------------------------------------------
